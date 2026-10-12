@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>注册 · WorkBuddy</title>
+  <link rel="icon" href="/favicon.ico" type="image/svg+xml">
+  <!-- 刻意复用 /login/assets/login.css：两页是同一套视觉，复制成两份必然漂移。
+       服务端在 /login/assets/ 下有白名单，register 页直接引用同源的那一份。 -->
+  <link rel="stylesheet" href="/login/assets/login.css">
+</head>
+<body>
+
+<!--
+  ⚠️ 本页与 /login 一样必须保持「纯骨架」：不得内联任何与身份有关的数据
+  （邮箱、uid、余额、密钥、站点名、用户数……）。
+  数据一律由 register.js 运行时取。
+
+  与 /login 的区别：这里**没有**「已登录就跳走」的逻辑 ——
+  一个已登录的人想再注册一个账户，是正常操作，不该被弹回用户中心。
+
+  ⭐ 注册是否可用**必须由本页自己判断**：
+  以前是登录页「隐藏注册 tab」把入口藏起来，但拆成独立页后
+  用户可以直接敲 /register —— 藏入口挡不住，所以必须自己拒绝渲染表单。
+-->
+
+<main class="auth-page">
+  <section class="auth-card">
+    <header class="auth-head">
+      <span class="eyebrow">WORKBUDDY</span>
+      <h1 class="auth-title">创建账户</h1>
+      <p class="auth-sub" id="auth-sub">注册后即可查看余额、用量与流水，并兑换充值码。</p>
+    </header>
+
+    <!-- 顶部横幅：注册被关闭 / 未配置 SMTP 等配置级提示 -->
+    <div id="notice" class="banner" hidden></div>
+
+    <!-- 注册不可用时，用这个块替代表单（内容由 register.js 填，不用 innerHTML） -->
+    <div id="locked-box" class="locked-box" hidden>
+      <p class="locked-title">当前无法注册</p>
+      <p class="locked-reason" id="locked-reason"></p>
+      <p class="hint" id="locked-hint" hidden></p>
+    </div>
+
+    <!-- ── 注册 ─────────────────────────────────────────────── -->
+    <form id="register-form" class="auth-form" novalidate>
+      <div class="field">
+        <label for="reg-email">邮箱</label>
+        <input id="reg-email" type="email" name="email" autocomplete="username"
+               spellcheck="false" placeholder="you@example.com" required>
+      </div>
+
+      <!-- 验证码字段：仅在 require_email_code=true 时显示（JS 控制） -->
+      <div class="field" id="code-field" hidden>
+        <label for="reg-code">邮箱验证码</label>
+        <div class="code-row">
+          <input id="reg-code" type="text" inputmode="numeric" autocomplete="one-time-code"
+                 maxlength="6" spellcheck="false" placeholder="6 位数字">
+          <button type="button" class="btn ghost" id="send-code">发送验证码</button>
+        </div>
+        <p class="hint" id="code-hint">验证码 10 分钟内有效，收不到请检查垃圾邮件。</p>
+      </div>
+
+      <div class="field">
+        <label for="reg-password">密码</label>
+        <input id="reg-password" type="password" name="password"
+               autocomplete="new-password" placeholder="至少 8 位" required>
+        <p class="hint">至少 8 位。建议用一句你自己记得住、别人猜不到的话。</p>
+      </div>
+      <p id="register-error" class="field-error" hidden></p>
+      <button type="submit" class="btn primary block" id="register-submit">注册并登录</button>
+    </form>
+
+    <p class="auth-foot">
+      <a href="/login" id="to-login">已有账户？登录 →</a>
+    </p>
+  </section>
+
+  <aside class="auth-aside" aria-hidden="false">
+    <h2>这个账户能做什么</h2>
+    <ul class="feature-list">
+      <li><span class="dot"></span><div><strong>查看余额与用量</strong><small>请求次数、Token、消耗积分一目了然。</small></div></li>
+      <li><span class="dot"></span><div><strong>兑换充值码</strong><small>兑换后立即计入余额，随时可用。</small></div></li>
+      <li><span class="dot"></span><div><strong>管理你的密钥</strong><small>查看名下 API Key 的状态与归属。</small></div></li>
+    </ul>
+    <p class="aside-fine">账户用于查看自己的用量与余额。调用接口仍然使用 API Key。</p>
+  </aside>
+</main>
+
+<script src="/register/assets/register.js"></script>
+</body>
+</html>

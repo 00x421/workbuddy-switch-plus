@@ -1,0 +1,21 @@
+# Trellis: append-only developer journals should merge cleanly across
+# parallel sessions/worktrees — each session only appends a new block, so
+# there is nothing to actually conflict on.
+#
+# Do NOT add a rule for workspace/*/index.md here — it is fully regenerated
+# every session, so a real conflict there is expected and safe to resolve by
+# picking either side (task state lives in task.json, not index.md). See
+# .trellis/spec/cli/backend/directory-structure.md for details.
+.trellis/workspace/*/journal-*.md merge=union
+
+# 换行符统一按 LF 入库，工作区也保持 LF。
+#
+# 不钉死会出现「整个文件都变了」的假 diff：文件入库时是 CRLF，某个工具下一次
+# 写回时改成 LF（`cargo build` 重写 Cargo.lock 就是这样），于是几千行全是变更，
+# 真正的内容改动被淹没。仓库里没有需要 CRLF 的东西，统一 LF 最省事。
+* text=auto eol=lf
+
+# 例外：cmd.exe 对 LF-only 的批处理容错很差（行尾会被当成命令的一部分），
+# 这两个扩展名钉回 CRLF。
+*.cmd text eol=crlf
+*.bat text eol=crlf

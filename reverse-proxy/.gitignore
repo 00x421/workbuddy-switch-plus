@@ -1,0 +1,13 @@
+# 运行态数据：密钥、用户、审计日志、账号额度缓存（首次启动自动生成）
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 打包产物
+build/
+dist/
+*.spec.bak

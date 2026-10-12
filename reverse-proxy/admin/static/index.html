@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="dark"><title>WorkBuddy · 管理控制台</title><link rel="icon" href="/favicon.ico" type="image/svg+xml"><link rel="stylesheet" href="/admin/assets/style.css"><script defer src="/admin/assets/app.js"></script></head>
+<body>
+<section id="login" class="login-screen" hidden>
+  <div class="login-story"><a class="brand" href="/admin/"><span class="brand-symbol">w<span>↗</span></span>WORKBUDDY <span class="brand-label">CONSOLE</span></a><div><span class="eyebrow light">YOUR MODELS, CONNECTED.</span><h1>把连接打理好。<br><em>让工作继续。</em></h1><p>在一个地方管理登录凭据、客户端密钥<br>和你的模型连接。</p></div><footer><span class="status-dot"></span> 私有部署 · 你的工作空间</footer></div>
+  <div class="login-form-wrap"><form id="login-form"><span class="eyebrow">WORKSPACE ACCESS</span><h2>登录管理控制台</h2><p class="muted">凭据只保存在服务器，浏览器不留存。客户端 API Key 不适用于此处。</p><div class="login-modes" role="tablist" aria-label="登录方式"><button type="button" class="login-mode is-active" role="tab" aria-selected="true" data-login-mode="user">管理员账号</button><button type="button" class="login-mode" role="tab" aria-selected="false" data-login-mode="key">管理密钥</button><button type="button" class="login-mode" role="tab" aria-selected="false" data-login-mode="token">管理令牌</button></div><div class="login-pane" data-login-pane="user"><label for="login-username">用户名</label><input id="login-username" name="username" autocomplete="username" placeholder="admin" required><label for="login-password">密码</label><input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="输入管理员密码" required></div><div class="login-pane" data-login-pane="key" hidden><label for="admin-key">管理密钥</label><input id="admin-key" name="key" type="password" autocomplete="off" placeholder="输入你的管理密钥" disabled><p class="login-note">部署时通过 <code>ADMIN_KEY</code> 配置的单密钥入口，适合 Docker / 命令行直接跑服务的情况。</p></div><div class="login-pane" data-login-pane="token" hidden><label for="login-token">管理令牌</label><input id="login-token" name="token" type="password" autocomplete="off" placeholder="wbt_…" disabled><p class="login-note">在桌面端「反代服务 → 管理令牌」里生成。只读令牌进得来、看得到数据，但改不了东西；改用户和改令牌这两类操作仍然只认会话登录。</p></div><p id="login-error" class="field-error" role="alert"></p><button class="primary wide" type="submit">进入控制台 <span>↗</span></button><div class="privacy-note"><span>◇</span><p>账号凭据保存在服务器。<br>浏览器不会保存你输入的任何凭据。</p></div></form><span class="login-foot">WorkBuddy / CodeBuddy · API Management</span></div>
+</section>
+<div id="workspace" class="app-shell" hidden>
+  <aside class="sidebar"><a class="brand" href="/admin/"><span class="brand-symbol">w<span>↗</span></span><span>WORKBUDDY<small>管理控制台</small></span></a><div class="nav-caption">工作空间</div><nav aria-label="主要导航"><button data-page="dashboard" class="nav-item"><span>▦</span>概览</button><button data-page="accounts" class="nav-item selected"><span>◫</span>账号池</button><button data-page="groups" class="nav-item"><span>❐</span>上游分组</button><button data-page="egress" class="nav-item"><span>⇥</span>出口线路</button><button data-page="logs" class="nav-item"><span>▤</span>请求日志</button><button data-page="keys" class="nav-item"><span>⌘</span>API 密钥</button><button data-page="billing" class="nav-item"><span>◈</span>充值与兑换码</button><button data-page="members" class="nav-item"><span>☰</span>用户管理</button><button data-page="settings" class="nav-item"><span>⚙</span>服务设置</button><button data-page="test" class="nav-item"><span>↗</span>连接测试</button><button data-page="guide" class="nav-item"><span>≡</span>接入指南</button></nav><div class="sidebar-bottom"><span class="tag">PRIVATE WORKSPACE</span><p><i class="status-dot"></i> 服务已连接</p><button id="logout" class="logout">退出登录 <span>↗</span></button></div></aside>
+  <div class="main-shell"><header class="topbar"><div><span class="muted">工作空间</span><span class="slash">/</span><span id="breadcrumb">账号管理</span></div><div class="topbar-right"><span id="host-label" class="mono"></span><span class="avatar">W</span></div></header>
+  <main>
+    <div class="page-title"><div><span id="page-kicker" class="eyebrow">ACCOUNT DIRECTORY</span><h1 id="page-title">账号管理<span class="title-dot">.</span></h1><p id="page-desc" class="muted">集中管理登录凭据、积分与账号可用状态。</p></div><button id="refresh" class="secondary"><span>↻</span> 刷新状态</button></div>
+    <div id="load-error" class="banner warning" role="alert" hidden></div>
+    <section id="page-dashboard" class="page-panel" hidden>
+      <div class="dashboard-metrics"><article><span>可用账号</span><strong id="dash-available">—</strong><small>启用且未冷却、未确认耗尽</small></article><article><span>账号总积分</span><strong id="dash-credits">—</strong><small id="dash-credit-note">以最近一次查询为准</small></article><article><span>对话请求</span><strong id="dash-requests">—</strong><small id="dash-request-note">本次服务启动以来</small></article><article><span>完成成功率</span><strong id="dash-success">—</strong><small>排除流式错误及未完整结束的请求</small></article></div>
+      <div class="dashboard-detail"><span>HTTP 成功率 <b id="dash-http">—</b></span><span>失败 <b id="dash-failed">—</b></span><span>进行中 <b id="dash-inflight">—</b></span><span>平均耗时 <b id="dash-latency">—</b></span><button id="dash-add" class="primary">＋ 添加账号</button></div>
+      <div class="dashboard-grid"><div><article class="surface dash-accounts"><div class="response-header"><div><h2>账号工作区</h2><p class="muted" id="dash-routing">可用账号自动轮转</p></div><button data-dashboard-page="accounts" class="text-button">管理账号 ↗</button></div><div id="dash-account-list"></div></article><article class="surface dash-recent"><div class="response-header"><div><h2>最近请求</h2><p class="muted">最近 100 条，仅记录时间、来源、接口、状态和耗时。</p></div><span class="eyebrow">LIVE ACTIVITY</span></div><div class="dashboard-table"><table><thead><tr><th>时间</th><th>来源 / 接口</th><th>响应状态</th><th class="align-right">耗时</th></tr></thead><tbody id="dash-recent-body"></tbody></table></div></article></div><aside><article class="dashboard-connect"><span class="eyebrow light">API CONNECTION</span><h2>随时接入，<br>你熟悉的工具。</h2><p>一个入口，连接你的 WorkBuddy 模型。</p><label>BASE URL</label><code id="dash-base"></code><button id="dash-copy" class="secondary">复制 API 地址</button><button data-dashboard-page="guide" class="dashboard-link">查看接入指南 ↗</button></article><article class="dash-start"><h3>开始使用</h3><button data-dashboard-page="accounts">① 管理账号与积分 ↗</button><button data-dashboard-page="test">② 测试模型响应 ↗</button><button data-dashboard-page="keys">③ 管理客户端密钥 ↗</button><p class="muted" id="dash-since"></p><p class="muted">统计随服务重启清零，不追溯升级前的历史请求。</p></article></aside></div>
+    </section>
+    <section id="page-accounts" class="page-panel" hidden>
+      <div class="stats"><article><span class="stat-label">已添加账号</span><div class="stat-number" id="account-count">—</div><span class="stat-foot">安全保存在你的服务器</span></article><article><span class="stat-label">请求分配</span><div class="stat-value" id="active-name">—</div><span class="stat-foot" id="active-state">加载中</span></article><article class="stat-accent"><span class="stat-label">服务状态 <i class="status-dot"></i></span><div class="stat-value">运行中 <span class="spark">↗</span></div><span class="stat-foot" id="uptime">—</span></article></div>
+      <div class="pool-summary"><span id="pool-counts">正在读取账号池…</span><strong>已知总积分 <span id="total-credits">—</span></strong></div>
+      <div class="section-toolbar"><div><h2>账号列表 <span id="account-badge" class="count-badge">0</span></h2><p>暂停账号不参与轮转；余额按最近一次查询结果显示。</p></div><button id="add-account" class="primary">＋ 添加账号</button></div>
+      <div class="pool-toolbar"><input id="account-search" type="search" placeholder="搜索备注、昵称或 UID" aria-label="搜索账号"><select id="account-filter" aria-label="筛选账号状态"><option value="all">全部状态</option><option value="available">可用</option><option value="cooling">冷却中</option><option value="paused">已暂停</option><option value="exhausted">积分耗尽</option><option value="invalid">凭据异常</option></select><button id="batch-checkin" data-batch class="secondary">▣ 批量签到</button><button id="batch-travel" data-batch class="secondary">✈ 批量派旅行</button><button id="batch-active" data-batch class="secondary">☀ 批量活跃上报</button></div>
+      <div class="table-wrap"><table><thead><tr><th>账号</th><th>状态 / 签到</th><th>剩余积分</th><th>凭据有效期</th><th class="align-right">操作</th></tr></thead><tbody id="accounts-body"></tbody></table><div id="accounts-empty" class="empty" hidden><span class="empty-icon">◫</span><h3>从第一个账号开始</h3><p>浏览器授权或导入登录文件，即可加入账号池。</p><button id="empty-add" class="secondary">添加登录凭据</button></div></div>
+      <div id="pool-result" class="banner" role="status" hidden></div>
+      <form id="pool-settings" class="pool-settings"><div><h3>自动任务与轮转</h3><p>北京时间每日执行；错过时间会补做，已签到不重复领取。派猫猫旅行按服务端状态机走：派发 → 到点回查 → 领奖，官网「累了，明天再来吧」即当日结束。凭据临近过期时提前刷新。活跃上报每号每天一轮：1 条点亮 growth 连登，5 条补满「领养猫需 5 次对话」的门槛。页面每 30 秒刷新，服务器每 5 分钟查询积分。</p></div><div class="pool-controls"><label>请求分配<select id="pool-routing"><option value="round_robin">账号池轮转</option><option value="manual">手动指定账号</option></select></label><label>签到时间（北京时间）<input id="checkin-time" type="time" required value="09:00"></label><label class="inline-checkbox"><input id="auto-checkin" type="checkbox">每日自动签到</label><label>派旅行时间（北京时间）<input id="travel-time" type="time" required value="08:30"></label><label class="inline-checkbox"><input id="auto-travel" type="checkbox">每日派猫猫旅行</label><label>保活提前量（小时）<input id="keepalive-hours" type="number" min="1" max="168" step="1" required value="6"></label><label class="inline-checkbox"><input id="auto-keepalive" type="checkbox">凭据临近过期自动刷新</label><label>活跃上报时间（北京时间）<input id="active-time" type="time" required value="10:00"></label><label>每日上报条数<input id="active-reports" type="number" min="1" max="5" step="1" required value="1"></label><label class="inline-checkbox"><input id="auto-active" type="checkbox">每日对话活跃上报</label><label>上游 workbuddy2api 地址<input id="wb2api-base" type="url" placeholder="http://127.0.0.1:7863" autocomplete="off"></label><label>上游管理密钥<input id="wb2api-key" type="password" placeholder="留空表示上游未设鉴权" autocomplete="off"></label><button class="primary" type="submit">保存设置</button></div></form>
+      <div class="section-toolbar"><div><h2>自动任务流水 <span id="task-log-badge" class="count-badge">0</span></h2><p>签到 / 派猫猫旅行 / 凭据保活的执行记录，最多保留最近 500 条。跨日不再重试「今日已派」与「无 Buddy」以外的失败。</p></div></div>
+      <div class="pool-toolbar"><select id="task-log-kind" aria-label="按任务类别筛选"><option value="">全部类别</option><option value="checkin">签到</option><option value="travel">派猫猫旅行</option><option value="keepalive">凭据保活</option><option value="active">活跃上报</option></select><button id="task-log-refresh" class="secondary">刷新</button><button id="task-log-clear" class="secondary">清空</button></div>
+      <div class="table-wrap"><table><thead><tr><th>时间</th><th>账号</th><th>类别</th><th>结果</th><th>说明</th></tr></thead><tbody id="task-logs-body"></tbody></table></div>
+      <div class="note-row"><span>ⓘ</span><p>访问令牌过期时，服务会尝试自动刷新。刷新凭据也失效后，请在桌面端重新登录并导入文件。页面中的“可刷新”不代表已验证账号额度。</p></div>
+      <div class="bottom-guide"><div><span class="eyebrow">NEXT STEP</span><h3>账号准备好，连接你的客户端。</h3><p>兼容 OpenAI Chat、Responses 和 Anthropic Messages。</p></div><button id="go-guide" class="text-button">查看接入指南 ↗</button></div>
+    </section>
+    <section id="page-groups" class="page-panel" hidden>
+      <div class="banner">分组是账号池的一个子集。把密钥绑定到分组后，它的请求只会在组内账号之间调度；一个分组都不绑的密钥仍可使用全部账号。</div>
+      <div class="section-toolbar"><div><h2>上游分组 <span id="group-badge" class="count-badge">0</span></h2><p>删除分组会顺带把绑它的密钥解绑，那些密钥随即恢复成「可用全部账号」。</p></div><button id="add-group" class="primary">＋ 新建分组</button></div>
+      <div class="table-wrap"><table><thead><tr><th>分组</th><th>成员账号</th><th>组内调度</th><th>状态</th><th class="align-right">操作</th></tr></thead><tbody id="groups-body"></tbody></table><div id="groups-empty" class="empty" hidden><span class="empty-icon">❐</span><h3>还没有分组</h3><p>按用途或线路把账号分到不同组，再让密钥只落在对应的账号上。</p><button id="empty-add-group" class="secondary">新建分组</button></div></div>
+    </section>
+    <section id="page-egress" class="page-panel" hidden>
+      <div class="banner">给单个账号指定一条命名 HTTP/HTTPS 代理，该账号的请求就会从这条线路出网。地址里的口令只保存在服务器上，界面一律显示为掩码。</div>
+      <div class="section-toolbar"><div><h2>出口线路 <span id="egress-badge" class="count-badge">0</span></h2><p>删除线路会把它上面挂的账号全部改回直连。</p></div><button id="add-egress" class="primary">＋ 新建线路</button></div>
+      <div id="egress-orphans" class="banner warning" role="alert" hidden></div><div id="egress-stale" class="banner" role="status" hidden></div><div id="egress-error" class="banner warning" role="alert" hidden></div>
+      <div class="table-wrap"><table><thead><tr><th>线路</th><th>代理地址</th><th>挂了哪些账号</th><th>状态</th><th class="align-right">操作</th></tr></thead><tbody id="egress-body"></tbody></table><div id="egress-empty" class="empty" hidden><span class="empty-icon">⇥</span><h3>还没有出口线路</h3><p>账号需要固定出口 IP 时，先建一条线路，再到下面把账号绑上去。</p><button id="empty-add-egress" class="secondary">新建线路</button></div></div>
+      <div class="section-toolbar"><div><h2>账号绑定 <span id="egress-account-badge" class="count-badge">0</span></h2><p>每个账号最多绑一条线路；选「直连」表示走服务器默认网络。</p></div></div>
+      <div class="table-wrap"><table><thead><tr><th>账号</th><th>账号状态</th><th>出口线路</th></tr></thead><tbody id="egress-accounts-body"></tbody></table></div>
+    </section>
+    <section id="page-logs" class="page-panel" hidden>
+      <div class="stats"><article><span class="stat-label">缓冲内请求</span><div class="stat-number" id="log-count">—</div><span class="stat-foot">最近保留的记录条数（已落盘）</span></article><article><span class="stat-label">消耗 Token</span><div class="stat-number" id="log-tokens">—</div><span class="stat-foot">上游返回的用量合计</span></article><article><span class="stat-label">消耗积分</span><div class="stat-number" id="log-credit">—</div><span class="stat-foot">按上游计费口径累计</span></article></div>
+      <div class="banner">最近 <strong>300</strong> 条会写入本地文件 <code>request-log.jsonl</code>（与 state.json 同目录），<strong>服务重启后仍在</strong>；不塞进 state.json 是因为日志是高频追加写，混进去会导致每记一条就重写整份状态文件。本页每 5 秒自动刷新。</div>
+      <div id="log-error" class="banner warning" role="alert" hidden></div>
+      <div class="section-toolbar"><div><h2>账号参与情况</h2><p>按账号汇总缓冲内的请求与消耗，用来核对轮转是否均匀。</p></div></div>
+      <div id="log-account-list" class="log-accounts"></div>
+      <div class="section-toolbar"><div><h2>请求明细 <span id="log-badge" class="count-badge">0</span></h2><p>切到本页时立即读取，之后每 5 秒自动刷新（页面不可见时暂停）。<span id="logs-updated" class="muted"></span></p></div><div class="seg" role="group" aria-label="明细呈现方式"><button id="log-view-flat" class="secondary" aria-pressed="true">明细表</button><button id="log-view-grouped" class="secondary" aria-pressed="false">按分组</button></div></div>
+      <div class="pool-toolbar"><select id="log-account" data-all="全部账号" aria-label="按账号筛选"><option value="all">全部账号</option></select><select id="log-model" data-all="全部模型" aria-label="按模型筛选"><option value="all">全部模型</option></select><select id="log-outcome" data-all="全部结果" aria-label="按结果筛选"><option value="all">全部结果</option><option value="success">成功</option><option value="upstream_error">上游报错</option><option value="no_account">无可用账号</option><option value="rejected">被规则拒绝</option></select><select id="log-group" data-all="全部分组" aria-label="按分组筛选"><option value="all">全部分组</option></select><button id="log-clear-filter" class="secondary">清除筛选</button></div>
+      <div id="log-flat-view" class="table-wrap"><table><thead><tr><th>时间</th><th>账号</th><th>分组</th><th>模型</th><th>结果</th><th class="align-right">Token</th><th class="align-right">积分</th><th class="align-right">耗时</th></tr></thead><tbody id="logs-body"></tbody></table></div>
+      <div id="log-grouped-view" class="log-groups" hidden></div>
+    </section>
+    <section id="page-keys" class="page-panel" hidden><div class="banner">API Key 用于客户端调用。密钥明文保存在本机 state.json 中，可随时点右侧的眼睛图标在掩码与明文之间切换；点「撤销」后立即停止接受新请求。</div><div class="section-toolbar"><div><h2>客户端密钥</h2><p>为不同客户端分别创建密钥，撤销后立即停止接受新请求。</p></div><button id="add-key" class="primary">＋ 创建密钥</button></div><div class="table-wrap"><table><thead><tr><th>名称</th><th>密钥</th><th>创建时间</th><th>上游分组</th><th class="align-right">操作</th></tr></thead><tbody id="keys-body"></tbody></table></div></section>
+    <section id="page-billing" class="page-panel" hidden>
+      <div class="stats">
+        <article><span class="stat-label">已发兑换码</span><div class="stat-number" id="bill-codes">—</div><span class="stat-foot">含已核销与未核销</span></article>
+        <article><span class="stat-label">已核销</span><div class="stat-number" id="bill-used">—</div><span class="stat-foot">被兑走的张数</span></article>
+        <article><span class="stat-label">已发放积分</span><div class="stat-number" id="bill-issued">—</div><span class="stat-foot">只算已核销的部分</span></article>
+        <article><span class="stat-label">未核销面额</span><div class="stat-number" id="bill-outstanding">—</div><span class="stat-foot">发出去但还没兑的</span></article>
+        <article><span class="stat-label">用户余额合计</span><div class="stat-number" id="bill-balance">—</div><span class="stat-foot">全体用户账上剩下的</span></article>
+      </div>
+      <div class="banner">「已发放」与「未核销」必须分开看：把未兑的码也算进发放量，账面会凭空多出好几倍的钱。<br>用户登录页在 <a href="/login" target="_blank" rel="noopener">/login</a>。<span class="muted">（2026-10 用户裁定：原 /portal/ 用户中心已移除，用户自助查看余额与用量的页面暂缺。）</span></div>
+
+      <div class="section-toolbar"><div><h2>手动充值</h2><p>直接给某个用户加余额，走的是同一条账本，会留下流水。</p></div></div>
+      <div id="recharge-result" class="banner" role="status" hidden></div>
+      <form id="recharge-form" class="pool-toolbar">
+        <select id="recharge-user" aria-label="选择用户"><option value="">选择用户…</option></select>
+        <input id="recharge-credit" type="number" min="0.001" step="0.001" placeholder="积分，例如 100" aria-label="充值积分" required>
+        <input id="recharge-note" maxlength="120" placeholder="备注（选填）" aria-label="充值备注">
+        <button type="submit" class="primary">充值</button>
+      </form>
+
+      <div class="section-toolbar"><div><h2>生成兑换码</h2><p>生成后明文只显示这一次，请立刻复制走。系统只保存哈希，之后谁也取不回明文。</p></div></div>
+      <form id="codes-form" class="pool-toolbar">
+        <input id="codes-count" type="number" min="1" max="500" value="10" aria-label="生成张数">
+        <input id="codes-credit" type="number" min="0.001" step="0.001" placeholder="每张面额" aria-label="每张面额" required>
+        <input id="codes-note" maxlength="120" placeholder="批次备注（选填）" aria-label="批次备注">
+        <button type="submit" class="primary">生成</button>
+      </form>
+      <div id="codes-output" class="banner" role="status" hidden></div>
+
+      <div class="section-toolbar"><div><h2>兑换码 <span id="codes-badge" class="count-badge">0</span></h2><p>明文不在库里，所以列表只能显示标识与状态。停用后无法再被兑换。</p></div></div>
+      <div class="pool-toolbar">
+        <select id="codes-status" aria-label="按状态筛选"><option value="all">全部</option><option value="unused">未核销</option><option value="used">已核销</option></select>
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>标识</th><th>批次</th><th class="align-right">面额</th><th>状态</th><th>核销人</th><th>备注</th><th class="align-right">操作</th></tr></thead><tbody id="codes-body"></tbody></table><div id="codes-empty" class="empty-state" hidden>还没有生成过兑换码。</div></div>
+
+      <div class="section-toolbar"><div><h2>资金流水 <span id="flows-badge" class="count-badge">0</span></h2><p>充值、兑换、消费三类都记在这里，最新在前。</p></div></div>
+      <div class="table-wrap"><table><thead><tr><th>时间</th><th>用户</th><th>类型</th><th class="align-right">金额</th><th class="align-right">余额</th><th>说明</th></tr></thead><tbody id="flows-body"></tbody></table><div id="flows-none" class="empty-state" hidden>还没有任何流水。</div></div>
+    </section>
+
+    <section id="page-members" class="page-panel" hidden>
+      <div class="banner">这里是<strong>终端用户</strong>（邮箱注册的账号），他们是计费主体，有积分余额和名下 API Key。
+        与「<strong>后台账号</strong>」是两套完全不同的东西 —— 后者在 <code>/admin/api/users</code>，用于登录这个管理控制台。
+        两处永不共用数据。</div>
+
+      <div class="stats">
+        <article><span class="stat-label">用户总数</span><div class="stat-number" id="mem-total">—</div><span class="stat-foot">含已禁用</span></article>
+        <article><span class="stat-label">正常</span><div class="stat-number" id="mem-active">—</div><span class="stat-foot">可以登录的账号</span></article>
+        <article><span class="stat-label">已禁用</span><div class="stat-number" id="mem-disabled">—</div><span class="stat-foot">无法登录，密钥仍可调用</span></article>
+        <article><span class="stat-label">管理员</span><div class="stat-number" id="mem-admins">—</div><span class="stat-foot">至少保留一个</span></article>
+        <article class="stat-accent"><span class="stat-label">余额合计</span><div class="stat-number" id="mem-balance">—</div><span class="stat-foot">全体用户账上剩下的积分</span></article>
+      </div>
+
+      <div id="mem-warn" class="banner warning" role="alert" hidden></div>
+
+      <div class="section-toolbar">
+        <div><h2>用户列表 <span id="mem-badge" class="count-badge">0</span></h2>
+          <p>点「详情」可看名下的密钥与最近流水。调整余额与删除用户需要账号密码登录（管理令牌登录时不开放）。</p></div>
+        <button id="mem-add" class="primary">＋ 分发账号</button>
+      </div>
+
+      <div class="pool-toolbar">
+        <input id="mem-search" type="search" placeholder="按邮箱或用户 ID 搜索" aria-label="搜索用户">
+        <button id="mem-refresh" class="secondary">刷新</button>
+        <button id="mem-prev" class="secondary" disabled>← 上一页</button>
+        <span id="mem-page" class="muted">—</span>
+        <button id="mem-next" class="secondary" disabled>下一页 →</button>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>邮箱</th><th>角色</th><th>状态</th><th class="num">余额（积分）</th>
+            <th>密钥</th><th>最近登录</th><th class="align-right">操作</th>
+          </tr></thead>
+          <tbody id="mem-body"></tbody>
+        </table>
+        <div id="mem-empty" class="empty" hidden>
+          <span class="empty-icon">☰</span>
+          <h3>还没有终端用户</h3>
+          <p>用户可以在登录页自行注册；若 SMTP 未配置或注册已关闭，用「分发账号」直接给他们开一个。</p>
+          <button id="mem-empty-add" class="secondary">分发账号</button>
+        </div>
+      </div>
+
+      <div id="mem-orphans" class="banner warning" role="alert" hidden></div>
+
+      <dialog id="mem-detail-dialog">
+        <form method="dialog" class="dialog-form">
+          <div class="dialog-heading"><h2 id="mem-detail-title">用户详情</h2><p class="muted" id="mem-detail-sub"></p></div>
+          <div id="mem-detail-body" class="detail-body"></div>
+          <div class="dialog-actions"><button value="close" class="secondary">关闭</button></div>
+        </form>
+      </dialog>
+
+      <dialog id="mem-add-dialog">
+        <form method="dialog" class="dialog-form" id="mem-add-form">
+          <div class="dialog-heading"><h2>分发账号</h2><p class="muted">直接为用户开一个已验证的账号。适用于 SMTP 未配置、用户无法自行注册的情况。</p></div>
+          <label>邮箱<input id="mem-new-email" type="email" placeholder="user@example.com" autocomplete="off" required></label>
+          <label>初始密码<input id="mem-new-password" type="password" placeholder="至少 8 位" autocomplete="new-password" required></label>
+          <label>角色<select id="mem-new-role"><option value="user">普通用户</option><option value="admin">管理员</option></select></label>
+          <p id="mem-add-error" class="field-error" hidden></p>
+          <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button type="button" id="mem-add-submit" class="primary">创建</button></div>
+        </form>
+      </dialog>
+
+      <dialog id="mem-balance-dialog">
+        <form method="dialog" class="dialog-form" id="mem-balance-form">
+          <div class="dialog-heading"><h2>调整余额</h2><p class="muted" id="mem-balance-who"></p></div>
+          <label>调整数量（积分）<input id="mem-balance-delta" type="number" step="0.001" placeholder="正数增加，负数扣减" required></label>
+          <p class="muted">这是<strong>增量</strong>不是设值：填 10 表示「再加 10 积分」。扣减不会让余额变成负数。</p>
+          <label>说明<input id="mem-balance-reason" type="text" maxlength="120" placeholder="例如：活动补偿"></label>
+          <p id="mem-balance-error" class="field-error" hidden></p>
+          <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button type="button" id="mem-balance-submit" class="primary">确认调整</button></div>
+        </form>
+      </dialog>
+    </section>
+
+    <section id="page-settings" class="page-panel" hidden>
+      <div id="set-smtp-warning" class="banner warning" role="alert" hidden></div>
+      <div id="set-error" class="banner warning" role="alert" hidden></div>
+      <div id="set-ok" class="banner ok" role="status" hidden></div>
+
+      <div class="settings-grid">
+        <form id="set-register-form" class="surface">
+          <span class="eyebrow">REGISTRATION</span>
+          <h2>注册与验证</h2>
+          <p class="muted">决定用户能否自己注册，以及注册时要不要邮箱验证码。</p>
+          <label class="switch-row">
+            <input id="set-allow-register" type="checkbox" class="switch">
+            <span><strong>开放注册</strong><small>关闭后，登录页不再显示注册入口，用户只能由管理员分发账号。</small></span>
+          </label>
+          <label class="switch-row">
+            <input id="set-require-code" type="checkbox" class="switch">
+            <span><strong>注册需要邮箱验证码</strong><small>开启后必须验证邮箱才能注册。<strong>未配置 SMTP 时注册会直接失败</strong>，不会降级为免验证。</small></span>
+          </label>
+          <label class="switch-row">
+            <input id="set-self-redeem" type="checkbox" class="switch">
+            <span><strong>允许用户自助兑换</strong><small>关闭后用户中心不再提供兑换入口。</small></span>
+          </label>
+          <label>站点名称<input id="set-site-name" type="text" maxlength="60" placeholder="留空则使用默认名称"></label>
+          <div class="dialog-actions-inline"><button type="submit" id="set-register-submit" class="primary">保存</button></div>
+        </form>
+
+        <form id="set-smtp-form" class="surface">
+          <span class="eyebrow">MAIL DELIVERY</span>
+          <h2>SMTP 发信</h2>
+          <p class="muted">用于发送注册验证码。未配置时，开启「注册需要邮箱验证码」会导致所有人都无法注册。</p>
+          <label class="switch-row">
+            <input id="set-smtp-enabled" type="checkbox" class="switch">
+            <span><strong>启用 SMTP</strong><small>关闭时不发信。</small></span>
+          </label>
+          <label>SMTP 主机<input id="set-smtp-host" type="text" placeholder="smtp.example.com" autocomplete="off"></label>
+          <label>端口<input id="set-smtp-port" type="number" min="1" max="65535" placeholder="465"></label>
+          <label>账号<input id="set-smtp-username" type="text" placeholder="you@example.com" autocomplete="off"></label>
+          <label>密码
+            <input id="set-smtp-password" type="password" placeholder="留空表示不修改" autocomplete="new-password">
+            <small class="muted" id="set-smtp-pw-state">口令状态：未知</small>
+          </label>
+          <label>发件人<input id="set-smtp-from" type="text" placeholder="WorkBuddy &lt;no-reply@example.com&gt;" autocomplete="off"></label>
+          <label class="switch-row">
+            <input id="set-smtp-ssl" type="checkbox" class="switch">
+            <span><strong>使用 SSL</strong><small>465 端口通常需要；587 端口一般关闭并走 STARTTLS。</small></span>
+          </label>
+          <div class="dialog-actions-inline">
+            <button type="submit" id="set-smtp-submit" class="primary">保存发信设置</button>
+            <button type="button" id="set-smtp-test" class="secondary">发送测试邮件</button>
+          </div>
+          <label>测试收件人<input id="set-smtp-test-to" type="email" placeholder="留空则用上面的账号" autocomplete="off"></label>
+          <p id="set-smtp-test-note" class="fine" hidden></p>
+        </form>
+      </div>
+
+      <form id="set-template-form" class="surface">
+        <span class="eyebrow">MESSAGE TEMPLATE</span>
+        <h2>邮件模板</h2>
+        <p class="muted">可用变量：<code>site_name</code>、<code>code</code>、<code>minutes</code>。留空则使用默认模板。</p>
+        <label>邮件主题<input id="set-email-subject" type="text" maxlength="120" placeholder="留空使用默认主题"></label>
+        <label>邮件正文<textarea id="set-email-body" rows="6" maxlength="2000" placeholder="留空使用默认正文"></textarea></label>
+        <div class="dialog-actions-inline"><button type="submit" id="set-template-submit" class="primary">保存模板</button></div>
+      </form>
+    </section>
+    <section id="page-test" class="page-panel" hidden><div class="test-layout"><form id="test-form" class="surface test-form"><span class="eyebrow">LIVE REQUEST</span><h2>发送一条真实请求</h2><p class="muted">使用当前选中的账号，测试会消耗少量上游额度。</p><div class="active-strip">当前账号 <strong id="test-account">—</strong></div><label for="model">测试模型</label><select id="model" required></select><label for="test-prompt">消息</label><textarea id="test-prompt" rows="5" maxlength="2000" required>请只回复：连接成功</textarea><button id="test-submit" class="primary wide" type="submit">发送测试 ↗</button></form><article class="surface response-surface"><div class="response-header"><h2>响应结果</h2><span id="test-status" class="pill">等待请求</span></div><pre id="test-output" class="test-output">选择模型并发送消息，结果将在这里显示。</pre><div id="test-meta" class="muted mono"></div></article></div><div class="section-toolbar"><div><h2>本次运行的测试记录</h2><p>仅记录状态与耗时，不记录测试消息或回复。</p></div></div><div id="test-history" class="history"></div></section>
+    <section id="page-guide" class="page-panel" hidden><div class="guide-grid"><article class="surface"><span class="eyebrow">01 / CREDENTIALS</span><h2>添加登录凭据</h2><p>优先使用“添加账号 → 浏览器登录”，在官方页面授权后自动保存，无需桌面客户端。也可在桌面端登录后，按 Win + R 打开以下目录导入文件：</p><div class="code-block"><code>%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth</code><button data-copy="%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth" class="copy-button">复制</button></div><p>将其中的 <code>.info</code> 文件拖入“添加账号”，或粘贴其 JSON 内容。支持保留多个账号并手动切换；浏览器授权和文件导入可同时使用。</p></article><article class="surface"><span class="eyebrow">02 / CLIENTS</span><h2>连接你的客户端</h2><label>OpenAI / Responses Base URL</label><div class="code-block"><code id="base-url"></code><button id="copy-base" class="copy-button">复制</button></div><label>Anthropic Base URL</label><div class="code-block"><code id="anthropic-url"></code><button id="copy-anthropic" class="copy-button">复制</button></div><p>在“API 密钥”创建 Key 后填入客户端。模型可先使用 <code>deepseek-v4.1-flash</code>；列表中的其他模型是否可用取决于账号权限。</p></article></div><article class="surface endpoints"><h2>支持的接口</h2><div><span>POST</span><code>/v1/chat/completions</code><p>OpenAI Chat Completions</p></div><div><span>POST</span><code>/v1/responses</code><p>Responses 客户端</p></div><div><span>POST</span><code>/v1/messages</code><p>Anthropic Messages</p></div><div><span>GET</span><code>/v1/models</code><p>内置模型列表</p></div></article></section>
+    <footer class="main-footer"><span>WORKBUDDY CONSOLE</span><span>凭据管理 · 安全连接 · 即时验证</span></footer>
+  </main></div>
+</div>
+<dialog id="account-dialog"><form id="account-form"><div class="dialog-heading"><div><span class="eyebrow">ADD ACCOUNT</span><h2>添加账号</h2></div><button type="button" class="icon-button close-dialog" aria-label="关闭">×</button></div><p class="muted">在官方页面完成登录，授权凭据保存在你的服务器。</p>
+<div class="account-modes" role="group" aria-label="选择添加账号方式"><button id="mode-browser" type="button" aria-pressed="true">↗ 浏览器登录</button><button id="mode-file" type="button" aria-pressed="false">⇧ 导入文件</button></div>
+<label for="account-name">账号备注 <span class="muted">（选填）</span></label><input id="account-name" maxlength="60" placeholder="例如：日常开发、备用账号">
+<section id="browser-login-panel"><div class="oauth-step"><span class="step-number">1</span><div><h3>在 WorkBuddy 完成登录</h3><p class="muted">生成专属链接，在官方页面完成扫码或账号登录。支持国内 CodeBuddy / WorkBuddy 账号。</p><button type="button" id="oauth-start" class="secondary">生成登录链接 ↗</button><div id="oauth-link-box" hidden><a id="oauth-open" class="primary" target="_blank" rel="noopener noreferrer">打开官方登录页面 ↗</a><button type="button" id="oauth-copy" class="text-button">复制链接</button></div></div></div><div class="oauth-step"><span class="step-number">2</span><div><h3>返回这里，自动保存账号</h3><p class="muted">完成登录后保持此窗口打开，系统会自动获取授权结果，无需复制回调地址。</p></div></div><div id="oauth-status" class="banner oauth-status" role="status" aria-live="polite">登录链接 5 分钟内有效。同一账号重新登录会更新凭据。</div><button type="button" id="oauth-retry" class="secondary" hidden>重新检查授权状态</button></section>
+<div id="file-import-panel" hidden><label id="file-drop" class="file-drop" for="credential-file"><span>↥</span><strong id="file-label">选择或拖入 .info / .json 文件</strong><small>文件最大 1 MB · 内容仅传入你的服务器</small><input id="credential-file" type="file" accept=".info,.json,application/json"></label><details><summary>或粘贴 JSON 内容</summary><label for="credential-json" class="sr-only">登录凭据 JSON</label><textarea id="credential-json" rows="6" placeholder='包含 "auth" 和 "account" 的完整 JSON' spellcheck="false"></textarea></details></div><p id="account-error" class="field-error" role="alert"></p><div class="dialog-actions"><button type="button" class="secondary close-dialog">取消</button><button id="account-import" type="submit" class="primary" hidden>导入账号</button></div></form></dialog>
+<dialog id="key-dialog"><form id="key-form"><div class="dialog-heading"><div><span class="eyebrow">NEW API KEY</span><h2>创建客户端密钥</h2></div><button type="button" class="icon-button close-dialog" aria-label="关闭">×</button></div><label for="key-name">密钥名称</label><input id="key-name" placeholder="例如：Cherry Studio" maxlength="60" required><label>上游分组 <span class="muted">（选填）</span></label><div id="key-groups" class="check-list"></div><p id="key-error" class="field-error" role="alert"></p><div class="dialog-actions"><button type="button" class="secondary close-dialog">取消</button><button type="submit" class="primary">创建密钥</button></div></form><div id="created-key" hidden><span class="eyebrow">KEY CREATED</span><h2>保存你的新密钥</h2><p class="muted">关闭后无法再次查看完整内容。请复制到安全的位置。</p><div class="secret-value"><code id="new-key-value"></code></div><div class="dialog-actions"><button id="copy-key" class="secondary">复制密钥</button><button class="primary close-dialog">我已保存</button></div></div></dialog>
+<dialog id="group-dialog"><form id="group-form"><div class="dialog-heading"><div><span class="eyebrow">UPSTREAM GROUP</span><h2 id="group-dialog-title">新建分组</h2></div><button type="button" class="icon-button close-dialog" aria-label="关闭">×</button></div><input id="group-id" type="hidden">
+<label for="group-name">分组名称</label><input id="group-name" maxlength="40" placeholder="例如：主力线路" required>
+<label for="group-desc">描述 <span class="muted">（选填）</span></label><input id="group-desc" maxlength="120" placeholder="例如：按量计费、低延迟">
+<label for="group-routing">组内调度方式</label><select id="group-routing"><option value="">跟随全局设置</option><option value="round_robin">轮转（轮流分配）</option><option value="manual">手动指定账号</option><option value="least_used">最少使用优先</option></select>
+<label class="inline-checkbox"><input id="group-enabled" type="checkbox" checked>启用该分组</label>
+<label>成员账号</label><div id="group-members" class="check-list"></div>
+<p id="group-error" class="field-error" role="alert"></p><div class="dialog-actions"><button type="button" class="secondary close-dialog">取消</button><button type="submit" class="primary">保存分组</button></div></form></dialog>
+<dialog id="egress-dialog"><form id="egress-form"><div class="dialog-heading"><div><span class="eyebrow">EGRESS LINE</span><h2 id="egress-dialog-title">新建线路</h2></div><button type="button" class="icon-button close-dialog" aria-label="关闭">×</button></div><input id="egress-id" type="hidden">
+<label for="egress-name">线路名称</label><input id="egress-name" maxlength="40" placeholder="例如：香港出口" required>
+<label for="egress-url">代理地址</label><input id="egress-url" placeholder="http://user:pass@host:8080" spellcheck="false">
+<p id="egress-url-hint" class="muted" hidden></p>
+<label class="inline-checkbox"><input id="egress-enabled" type="checkbox" checked>启用该线路</label>
+<p id="egress-error" class="field-error" role="alert"></p><div class="dialog-actions"><button type="button" class="secondary close-dialog">取消</button><button type="submit" class="primary">保存线路</button></div></form></dialog>
+<dialog id="confirm-dialog"><form id="confirm-form"><h2 id="confirm-title"></h2><p id="confirm-desc" class="muted"></p><label id="rename-label" for="rename-value" hidden>账号备注</label><input id="rename-value" maxlength="60" hidden><p id="confirm-error" class="field-error" role="alert"></p><div class="dialog-actions"><button type="button" class="secondary close-dialog">取消</button><button id="confirm-submit" type="submit" class="primary">确认</button></div></form></dialog>
+<div id="toast" class="toast" role="status" hidden></div>
+<div id="boot" class="boot"><span class="brand-symbol">w<span>↗</span></span><p>正在连接工作空间…</p></div>
+</body></html>
