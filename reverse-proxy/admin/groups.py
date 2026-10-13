@@ -16,6 +16,11 @@
   }
   keys.{kid}.groups = [gid, ...]   # 空 = 不限制（可路由到全部账号）
 
+enabled 的含义
+--------------
+`enabled=False` —— **这个分组整个不工作**，绑了它的密钥直接路由失败。
+这是「下线」。
+
 与 manager 的差异
 -----------------
 manager 的「分组」是它上游网关里的多账号池概念（一个池对应一个上游实例）。
@@ -64,6 +69,8 @@ def list_groups(store) -> list[dict]:
                 "name": item.get("name", ""),
                 "description": item.get("description", ""),
                 "enabled": bool(item.get("enabled", True)),
+                # 老数据没有这个字段。默认**允许用户使用**，与历史行为一致：
+                # 升级前用户本来就能选到所有分组，升级后不该突然选不到了。
                 "routing": norm_routing(item.get("routing")),
                 "created": item.get("created"),
                 "accounts": accounts,
@@ -99,12 +106,6 @@ def create_group(store, name, *, description="", accounts=None, routing="",
     return {"id": gid, "name": label}
 
 
-def _clean_accounts(store, accounts) -> list[str]:
-    """只保留确实存在的账号，去重且顺序稳定。
-
-    为什么不报错而是静默丢弃：账号可能刚被用户在别处删掉，这时保存分组应当
-    成功——把不存在的 id 写进去才是真正的问题（它会让 `empty` 判断永远为假）。
-    """
 def _clean_accounts(store, accounts, keep=()) -> list[str]:
     """只保留有效的账号 id，去重且顺序稳定。
 

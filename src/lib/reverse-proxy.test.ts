@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  SMTP_MISSING_REGISTER_NOTICE, creditFromMilli, flowKindLabel, fmtCredit, fmtCreditTime,
-  memberRoleLabel, memberStatusLabel, rp, smtpTestMessage, type RpAccount,
+  creditFromMilli, fmtCredit, fmtCreditTime, rp, type RpAccount,
 } from "./reverse-proxy";
 import { activeNote, fmtLeft, upstreamNote } from "@/components/reverse-proxy/accounts-panel";
 
@@ -284,159 +283,11 @@ describe("上游冷却小字（模型级）", () => {
   });
 });
 
-/**
- * 终端用户（members）管理接口的客户端契约。
- *
- * 与上面那组「活跃上报」同一个理由：这几条钉住的是**打到哪个 URL、用什么方法、
- * 字段名有没有写错**。字段名写错时前端不报错、界面静静地什么都不做，
- * 只有把路径与字段名逐字钉住才拦得住。
- *
- * ⚠️ 尤其要钉住「members 不是 users」：项目里既有的 `/admin/api/users` 管的是
- * 控制台账号，两者一旦串了，桌面端「用户管理」面板改的会是登录账号。
- */
-describe("用户管理（members）API 客户端", () => {
-  it("createMember 是 POST /admin/api/members（分发账号）", async () => {
-    const fetchMock = stubFetch({ id: "a1", email: "x@y.com" });
-
-    await rp.createMember({ email: "x@y.com", password: "Passw0rd", role: "user" });
-
-    const [url, init] = call(fetchMock);
-    expect(url).toBe("http://127.0.0.1:8787/admin/api/members");
-    expect(init.method).toBe("POST");
-    expect(JSON.parse(String(init.body))).toEqual({
-      email: "x@y.com", password: "Passw0rd", role: "user",
-    });
-  });
-
-  it("listMembers 打到 /admin/api/members，绝不打到 /admin/api/users", async () => {
-    const fetchMock = stubFetch({ items: [], total: 0 });
-
-    await rp.listMembers();
-
-    const [url, init] = call(fetchMock);
-    expect(url).toBe("http://127.0.0.1:8787/admin/api/members");
-    expect(url).not.toContain("/admin/api/users");
-    expect(init.method).toBe("GET");
-    expect(init.headers).toMatchObject({ "X-Admin-Token": TOKEN });
-  });
-
-  it("listMembers 的搜索与分页拼成查询串", async () => {
-    const fetchMock = stubFetch({ items: [] });
-
-    await rp.listMembers({ q: "alice@x.com", page: 3, size: 50 });
-
-    expect(call(fetchMock)[0]).toBe(
-      "http://127.0.0.1:8787/admin/api/members?q=alice%40x.com&page=3&size=50",
-    );
-  });
-
-  it("空搜索词不拼 q=（避免把「空搜索」变成一个额外的查询维度）", async () => {
-    const fetchMock = stubFetch({ items: [] });
-
-    await rp.listMembers({ q: "", page: 1, size: 20 });
-
-    expect(call(fetchMock)[0]).toBe("http://127.0.0.1:8787/admin/api/members?page=1&size=20");
-  });
-
-  it("memberDetail 的 uid 被 URL 编码，flows 上限带上", async () => {
-    const fetchMock = stubFetch({ id: "a1" });
-
-    await rp.memberDetail("a/../b", 80);
-
-    const [url, init] = call(fetchMock);
-    // 不编码的话 uid 里的 / 会被当成路径分隔，打到别的端点上。
-    expect(url).toBe("http://127.0.0.1:8787/admin/api/members/a%2F..%2Fb?flows=80");
-    expect(init.method).toBe("GET");
-  });
-
-  it("updateMember 是 PATCH，且只发改动过的字段", async () => {
-    const fetchMock = stubFetch({ id: "a1", role: "admin" });
-
-    await rp.updateMember("a1", { role: "admin" });
-
-    const [url, init] = call(fetchMock);
-    expect(url).toBe("http://127.0.0.1:8787/admin/api/members/a1");
-    expect(init.method).toBe("PATCH");
-    expect(JSON.parse(String(init.body))).toEqual({ role: "admin" });
-  });
-
-  it("禁用发的是 status=disabled（不是 enabled=false）", async () => {
-    const fetchMock = stubFetch({ id: "a1", status: "disabled" });
-
-    await rp.updateMember("a1", { status: "disabled" });
-
-    expect(JSON.parse(String(call(fetchMock)[1].body))).toEqual({ status: "disabled" });
-  });
-
-  it("adjustMemberBalance 发 delta_credit（增量）与 reason，且不叫 amount", async () => {
-    const fetchMock = stubFetch({ id: "a1", balance_milli: 1000, balance_credit: 1, delta_credit: 1 });
-
-    await rp.adjustMemberBalance("a1", 1, "充值");
-
-    const [url, init] = call(fetchMock);
-    expect(url).toBe("http://127.0.0.1:8787/admin/api/members/a1/balance");
-    expect(init.method).toBe("POST");
-    // 服务端读的是 delta_credit；写成 amount / balance 会被它当「没改动」静默丢掉。
-    expect(JSON.parse(String(init.body))).toEqual({ delta_credit: 1, reason: "充值" });
-  });
-
-  it("deleteMember 是 DELETE；force=false 时不带 force=true", async () => {
-    const fetchMock = stubFetch({ ok: true });
-
-    await rp.deleteMember("a1");
-
-    const [url, init] = call(fetchMock);
-    expect(url).toBe("http://127.0.0.1:8787/admin/api/members/a1");
-    expect(init.method).toBe("DELETE");
-  });
-
-  it("deleteMember(force=true) 带上 force=true（余额非 0 时的强制删除）", async () => {
-    const fetchMock = stubFetch({ ok: true });
-
-    await rp.deleteMember("a1", true);
-
-    expect(call(fetchMock)[0]).toBe("http://127.0.0.1:8787/admin/api/members/a1?force=true");
-  });
-
-  it("memberStats 打到 /admin/api/members/stats", async () => {
-    const fetchMock = stubFetch({ total: 0 });
-
-    await rp.memberStats();
-
-    expect(call(fetchMock)[0]).toBe("http://127.0.0.1:8787/admin/api/members/stats");
-  });
-
-  it("删用户撞上 409（余额非 0）时把服务端原话抛出来", async () => {
-    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(
-      new Response(JSON.stringify({ detail: "该用户还有 10 积分余额，请先结清或使用强制删除" }), {
-        status: 409, headers: { "Content-Type": "application/json" },
-      }),
-    )));
-
-    await expect(rp.deleteMember("a1")).rejects.toMatchObject({
-      status: 409,
-      message: "该用户还有 10 积分余额，请先结清或使用强制删除",
-    });
-  });
-
-  it("令牌会话被 require_session_admin 拒时，403 的原话要能原样取到", async () => {
-    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(
-      new Response(JSON.stringify({ detail: "该接口不接受 API 令牌，请用会话登录后操作" }), {
-        status: 403, headers: { "Content-Type": "application/json" },
-      }),
-    )));
-
-    await expect(rp.adjustMemberBalance("a1", 1, "x")).rejects.toMatchObject({
-      status: 403,
-      message: "该接口不接受 API 令牌，请用会话登录后操作",
-    });
-  });
-});
 
 /** 服务设置接口的客户端契约（两端共用同一套字段名）。 */
 describe("服务设置 API 客户端", () => {
   it("settings 是 GET /admin/api/settings", async () => {
-    const fetchMock = stubFetch({ allow_register: true });
+    const fetchMock = stubFetch({ site_name: "WB" });
 
     await rp.settings();
 
@@ -446,82 +297,18 @@ describe("服务设置 API 客户端", () => {
   });
 
   it("saveSettings 是 PUT，且只发传进来的键（浅合并，不能整份回传）", async () => {
-    const fetchMock = stubFetch({ allow_register: true });
+    const fetchMock = stubFetch({ site_name: "WB" });
 
     await rp.saveSettings({ site_name: "工作台" });
 
     const [url, init] = call(fetchMock);
     expect(url).toBe("http://127.0.0.1:8787/admin/api/settings");
     expect(init.method).toBe("PUT");
-    // 整份回传会带上 smtp；两端各自拼整份对象时拼法一旦不同，
-    // 就是「网页端改完桌面端没了」。所以这里断言 body 里只有 site_name。
+    // 浅合并：只发改动过的键。整份回传会让两端互相覆盖。
     expect(JSON.parse(String(init.body))).toEqual({ site_name: "工作台" });
   });
-
-  it("SMTP 密码不传 = 不改密码（body 里不出现 password 键）", async () => {
-    const fetchMock = stubFetch({});
-
-    await rp.saveSettings({ smtp: { host: "smtp.x.com", port: 465 } });
-
-    const body = JSON.parse(String(call(fetchMock)[1].body));
-    expect(body.smtp).toEqual({ host: "smtp.x.com", port: 465 });
-    expect("password" in body.smtp).toBe(false);
-  });
-
-  it("smtp-test 是 POST /admin/api/settings/smtp-test", async () => {
-    const fetchMock = stubFetch({ ok: true, message: "已发出" });
-
-    await rp.testSmtp("me@x.com");
-
-    const [url, init] = call(fetchMock);
-    expect(url).toBe("http://127.0.0.1:8787/admin/api/settings/smtp-test");
-    expect(init.method).toBe("POST");
-    expect(JSON.parse(String(init.body))).toEqual({ to: "me@x.com" });
-  });
-
-  it("不传收件人时不发 to 键（服务端据此发给发件人自己）", async () => {
-    const fetchMock = stubFetch({ ok: true });
-
-    await rp.testSmtp();
-
-    expect(JSON.parse(String(call(fetchMock)[1].body))).toEqual({});
-  });
 });
 
-/**
- * 测试发信的取值口径。
- *
- * 这几条的由来：我最初按契约写了 `result.message`，而真机返回的是
- *   `{ok:false, error:"未配置 SMTP 主机"}` / `{ok:true, to:"a@b.com"}`
- * ——成功与失败用的是两个不同的键，而且都不是 message。
- * 于是失败时会弹一句没有信息量的「测试失败」，管理员看不到真正的原因。
- * （这个是 web-ui 交叉核对时抓出来的，两边都差点写错。）
- */
-describe("测试发信的文案取值", () => {
-  it("失败时显示服务端给的原因（error 键）", () => {
-    expect(smtpTestMessage({ ok: false, error: "未配置 SMTP 主机" })).toBe("未配置 SMTP 主机");
-    expect(smtpTestMessage({ ok: false, error: "发送失败：认证被拒" })).toBe("发送失败：认证被拒");
-  });
-
-  it("成功时带上收件人", () => {
-    expect(smtpTestMessage({ ok: true, to: "me@x.com" })).toBe("测试邮件已发往 me@x.com");
-  });
-
-  it("成功但没给收件人时退一句通用成功文案", () => {
-    expect(smtpTestMessage({ ok: true })).toBe("测试邮件已发出");
-  });
-
-  it("两套键都缺时退兜底文案，且不显示成空白", () => {
-    expect(smtpTestMessage({ ok: false })).toBe("测试发信失败");
-    expect(smtpTestMessage(null)).toBe("测试发信失败");
-  });
-
-  it("兼容 message 键（万一别的版本用它）", () => {
-    expect(smtpTestMessage({ ok: false, message: "旧的失败文案" })).toBe("旧的失败文案");
-    // error 优先于 message。
-    expect(smtpTestMessage({ ok: false, error: "新的", message: "旧的" })).toBe("新的");
-  });
-});
 
 /**
  * 显示口径（sync-spec「显示口径」）。
@@ -551,18 +338,6 @@ describe("积分显示口径", () => {
     expect(fmtCredit(Number.NaN)).toBe("0");
   });
 
-  it("角色/状态的中文与网页端一致（admin=管理员，user=普通用户）", () => {
-    // 注意：这里的 admin/user 是终端用户的角色，不是后台账号的 admin/viewer。
-    expect(memberRoleLabel("admin")).toBe("管理员");
-    expect(memberRoleLabel("user")).toBe("普通用户");
-    expect(memberStatusLabel("active")).toBe("正常");
-    expect(memberStatusLabel("disabled")).toBe("已禁用");
-  });
-
-  it("未知角色/状态原样显示，不显示成空白", () => {
-    expect(memberRoleLabel("superuser")).toBe("superuser");
-    expect(memberRoleLabel("")).toBe("—");
-  });
 
   it("流水时间用本地时区的 YYYY-MM-DD HH:mm", () => {
     // 用本地时间构造，避免断言依赖运行机器的时区偏移。
@@ -575,17 +350,5 @@ describe("积分显示口径", () => {
     expect(fmtCreditTime(null)).toBe("—");
   });
 
-  it("流水类别有中文；未知类别原样显示", () => {
-    // 这几个 kind 是后端真的会写出来的（redemption.grant/spend 的全部调用点）。
-    expect(flowKindLabel("recharge")).toBe("充值");
-    expect(flowKindLabel("admin_adjust")).toBe("管理员调整");
-    // 未知类别原样显示而非留空：留空会让管理员以为流水坏了。
-    expect(flowKindLabel("brand_new")).toBe("brand_new");
-  });
 
-  it("SMTP 未配置的提示是用户指定的原文（两端一字不差）", () => {
-    expect(SMTP_MISSING_REGISTER_NOTICE).toBe(
-      "未配置 SMTP，当前无法注册 请联系管理员关闭验证码验证 或者给您分发账号登录",
-    );
-  });
 });

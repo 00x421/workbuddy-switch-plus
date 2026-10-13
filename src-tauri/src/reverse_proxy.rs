@@ -661,6 +661,9 @@ pub fn reverse_proxy_save_login(login: Option<Value>) -> Result<(), String> {
 }
 
 /// 手动指定反代服务可执行文件；传空字符串表示清除指定、回到自动探测。
+///
+/// 这个路径会被 `reverse_proxy_start` 直接 `Command::new` 起来，
+/// 所以只判断「文件存在」是不够的 —— 那等于任意路径都能成为执行目标。
 #[tauri::command]
 pub fn reverse_proxy_set_exe(
     state: tauri::State<'_, ReverseProxy>,
@@ -671,10 +674,7 @@ pub fn reverse_proxy_set_exe(
         .filter(|value| !value.is_empty());
 
     if let Some(value) = cleaned.as_deref() {
-        let candidate = Path::new(value);
-        if !candidate.is_file() {
-            return Err(format!("指定的文件不存在：{value}"));
-        }
+        validate_custom_exe(value)?;
     }
 
     let mut saved = load_saved();
@@ -684,6 +684,61 @@ pub fn reverse_proxy_set_exe(
     let mut inner = state.lock();
     inner.exe = cleaned.map(PathBuf::from);
     Ok(status_of(&mut inner))
+}
+
+/// 校验手动指定的反代 exe 能否作为执行目标。
+///
+/// 允许手动指定是因为用户可能把反代放在任意位置，只挡掉明确不该被执行的目标：
+/// 非可执行文件、系统目录、UNC 网络路径、相对路径。
+fn validate_custom_exe(value: &str) -> Result<(), String> {
+    let candidate = Path::new(value);
+    if !candidate.is_file() {
+        return Err(format!("指定的文件不存在：{value}"));
+    }
+
+    if !candidate.is_absolute() {
+        return Err("请填写完整路径（不支持相对路径）".to_string());
+    }
+
+    #[cfg(windows)]
+    {
+        let ext = candidate
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if ext != "exe" {
+            return Err("反代服务必须是 .exe 文件".to_string());
+        }
+        // UNC：\\server\share\...
+        if value.starts_with(r"\\") {
+            return Err("不支持网络共享路径，请先把文件复制到本机".to_string());
+        }
+        if let Some(root) = std::env::var_os("SystemRoot") {
+            let system32 = PathBuf::from(&root).join("System32");
+            if candidate.starts_with(&system32) {
+                return Err("不支持系统目录下的程序".to_string());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let ok = std::fs::metadata(candidate)
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false);
+        if !ok {
+            return Err("反代服务没有可执行权限".to_string());
+        }
+        for dir in ["/bin", "/sbin", "/usr/bin", "/usr/sbin", "/System"] {
+            if candidate.starts_with(dir) {
+                return Err("不支持系统目录下的程序".to_string());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -729,5 +784,48 @@ mod tests {
         let path = login_path();
         assert_eq!(path.file_name().unwrap(), "reverse-proxy-login.json");
         assert_eq!(path.parent().unwrap(), config::store_dir().as_path());
+    }
+
+    #[test]
+    fn validate_custom_exe_rejects_non_executable_and_system_paths() {
+        let root = std::env::temp_dir().join(format!("wbsp-exe-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        // 不存在 / 不是文件 -> 拒
+        assert!(validate_custom_exe(&root.join("nope.exe").to_string_lossy()).is_err());
+        assert!(validate_custom_exe(&root.to_string_lossy()).is_err());
+
+        // 相对路径 -> 拒（解析基准不确定，容易被同名文件顶替）
+        assert!(validate_custom_exe("wb-reverse-proxy.exe").is_err());
+
+        #[cfg(windows)]
+        {
+            // 存在但不是 .exe -> 拒
+            let txt = root.join("payload.txt");
+            std::fs::write(&txt, b"x").unwrap();
+            assert!(validate_custom_exe(&txt.to_string_lossy()).is_err());
+
+            // UNC 路径 -> 拒
+            assert!(validate_custom_exe(r"\\server\share\evil.exe").is_err());
+
+            // 系统目录 -> 拒（System32 下没有合法反代）
+            if let Some(sysroot) = std::env::var_os("SystemRoot") {
+                let victim = PathBuf::from(sysroot)
+                    .join("System32")
+                    .join("cmd.exe");
+                if victim.is_file() {
+                    assert!(validate_custom_exe(&victim.to_string_lossy()).is_err(),
+                            "System32 下的程序不该被接受为反代");
+                }
+            }
+
+            // 合法的用户目录 exe -> 放行
+            let ok = root.join("wb-reverse-proxy.exe");
+            std::fs::write(&ok, b"x").unwrap();
+            assert!(validate_custom_exe(&ok.to_string_lossy()).is_ok(),
+                    "用户自己目录里的 .exe 是合法用法，不该被挡");
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -736,6 +736,30 @@ class SwitchStore:
             thread.join(timeout)
         self._runtime_thread = None
 
+    # ── 上下文管理器：把「停线程」变成结构性保证 ──────────────────────
+    #
+    # 为什么需要它：`start_runtime_writer()` 起的 daemon 线程会**一直活着**，
+    # 每 interval 秒调一次 `write_runtime_file()`（内部走 `os.replace`）。
+    # 一个用例 `setUp` 建了 store 却从不 `stop_runtime_writer()`，
+    # 线程就留到**后续用例**里继续跑。
+    #
+    # 后果实测过（`_hyact_work/prove_thread_leak.py`，三条证据齐全）：
+    #   · 连建 10 只 store -> 10 个 `wb-runtime-writer` 线程存活；
+    #   · 1 秒内 `os.replace` 被这些线程调了 4 次；
+    #   · `test_repeated_appends_do_not_rewrite_the_file_every_time`
+    #     用「replace 被调了几次」判断实现对不对，
+    #     于是被别人的线程污染成 **单跑绿、全量红**。
+    #
+    # 单测里逐个补 `stop_runtime_writer()` 也能修，但那是「靠记性」——
+    # 下一个人再写一个用例又会漏。所以给 store 本身加 `with` 支持：
+    # 只要用 `with make_store() as store:`，线程在退出块时必然被停。
+    def __enter__(self) -> "SwitchStore":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self.stop_runtime_writer()
+        return False            # 不吞异常：异常照常向上抛
+
     def account_rows(self) -> list[dict]:
         # 每次读取前先按指纹判断账号库有没有变——管理端刷新 / 池选号
         # 都会走到这里，所以「switch 里加了账号」下一次请求就能看到。

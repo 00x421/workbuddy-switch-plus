@@ -15,9 +15,7 @@ const labels = {
   egress: ["出口线路", "EGRESS LINES", "给账号指定固定的出口代理，并查看每个账号当前走哪条线路。"],
   logs: ["请求日志", "REQUEST ACTIVITY", "每个请求用了哪个账号、什么模型，消耗了多少 Token 与积分。"],
   keys: ["API 密钥", "CLIENT ACCESS", "为每个客户端分配独立密钥，让连接清晰可控。"],
-  billing: ["充值与兑换码", "BILLING & VOUCHERS", "为用户充值、生成兑换码，并核对每一笔资金流水。"],
-  members: ["用户管理", "END USERS", "邮箱注册出来的终端用户：余额、角色、启停与名下密钥。与「后台账号」是两套东西。"],
-  settings: ["服务设置", "SERVICE SETTINGS", "开放注册、邮箱验证码与 SMTP 发信。改这里会直接影响所有人都能不能注册。"],
+  settings: ["服务设置", "SERVICE SETTINGS", "服务名称等基础设置。"],
   test: ["连接测试", "CONNECTION LAB", "从当前账号发起请求，确认模型能否正常响应。"],
   guide: ["接入指南", "GET CONNECTED", "从导入凭据到客户端接入，只需几步。"]
 };
@@ -87,10 +85,8 @@ function goPage(next) {
   if (next === "accounts" && csrf) loadTaskLogs();
   // 计费页同理。注意别只加在 refresh() 里：refresh 是 30 秒轮询触发的，
   // 用户点进页面后会先盯着一张全 "—" 的空表等半分钟 —— 表现得像坏了。
-  if (next === "billing" && csrf) loadBilling();
   // 用户管理与服务设置也在这里拉：这两页不进 30 秒轮询 ——
   // 设置是低频操作，轮询只会白白重画表单，把管理员正在输入的内容冲掉。
-  if (next === "members" && csrf) loadMembers();
   if (next === "settings" && csrf) loadSettings();
 }
 /* 运行时长。两个口径，都要显示：
@@ -169,7 +165,9 @@ function render() {
     // 用 || 会让它退到默认值，用户就永远清不掉已填的地址。
     $("wb2api-base").value = overview.pool?.wb2api_base ?? ""; $("wb2api-key").value = overview.pool?.wb2api_key ?? "";
   }
-  $("keys-body").innerHTML = keys.map(k => `<tr><td><strong>${esc(k.name)}</strong></td><td><div class="secret-cell"><code data-secret="${esc(k.secret || k.hint)}" data-hidden="1">${esc(k.secret ? "•".repeat(12) : k.hint)}</code><button class="text-button reveal" data-reveal="${k.id}" title="显示 / 隐藏密钥" aria-label="显示或隐藏密钥">${ICON_EYE}</button></div></td><td class="muted mono">${esc(stamp(k.created * 1000))}</td><td>${groupTags(k.groups)}</td><td class="align-right"><div class="actions"><button class="danger" data-revoke="${k.id}">撤销</button></div></td></tr>`).join("");
+  const keyRow = k => `<tr><td><strong>${esc(k.name)}</strong></td><td><div class="secret-cell"><code data-secret="${esc(k.secret || k.hint)}" data-hidden="1">${esc(k.secret ? "•".repeat(12) : k.hint)}</code><button class="text-button reveal" data-reveal="${k.id}" title="显示 / 隐藏密钥" aria-label="显示或隐藏密钥">${ICON_EYE}</button></div></td><td class="muted mono">${esc(stamp(k.created * 1000))}</td><td>${groupTags(k.groups)}</td><td class="align-right"><div class="actions"><button class="danger" data-revoke="${k.id}">撤销</button></div></td></tr>`;
+  $("keys-body").innerHTML = keys.map(keyRow).join("")
+    || '<tr><td colspan="5" class="history-empty">还没有密钥。</td></tr>';
   const selected = $("model").value || overview.default_model || "deepseek-v4.1-flash";
   $("model").replaceChildren(...models.map(model => { const o = document.createElement("option"); o.value = o.textContent = model; return o; }));
   if (models.includes(selected)) $("model").value = selected;
@@ -466,29 +464,33 @@ function openEgressDialog(line) {
   $("egress-url-hint").hidden = !line;
   $("egress-url-hint").textContent = line ? `当前地址：${line.url}（口令不回显，要改就整条重填）` : "";
   $("egress-enabled").checked = line ? line.enabled : true;
-  $("egress-error").textContent = "";
+  $("egress-form-error").textContent = "";
   $("egress-dialog").showModal();
 }
 
 $("add-egress").addEventListener("click", () => openEgressDialog(null));
 $("empty-add-egress").addEventListener("click", () => openEgressDialog(null));
 $("egress-dialog").addEventListener("close", () => {
-  $("egress-form").reset(); $("egress-id").value = ""; $("egress-error").textContent = ""; $("egress-url-hint").hidden = true;
+  $("egress-form").reset(); $("egress-id").value = ""; $("egress-form-error").textContent = ""; $("egress-url-hint").hidden = true;
 });
 $("egress-form").addEventListener("submit", async e => {
   e.preventDefault(); e.submitter.disabled = true;
   const lid = $("egress-id").value, url = $("egress-url").value.trim();
+  // 对话框内的错误写进 egress-form-error（在对话框里可见）。
+  // 不能写 egress-error —— 那是页面顶部横幅，对话框盖在它上面，
+  // 用户看不到任何提示，只会觉得「点了保存没反应」。
+  $("egress-form-error").textContent = "";
   try {
     if (lid) {
       const body = {name: $("egress-name").value.trim(), enabled: $("egress-enabled").checked};
       if (url) body.url = url;
       await api("egress/lines/" + lid, {method: "PATCH", body});
     } else {
-      if (!url) { $("egress-error").textContent = "请填写代理地址，例如 http://user:pass@host:8080"; return; }
+      if (!url) { $("egress-form-error").textContent = "请填写代理地址，例如 http://user:pass@host:8080"; return; }
       await api("egress/lines", {method: "POST", body: {name: $("egress-name").value.trim(), url, enabled: $("egress-enabled").checked}});
     }
     $("egress-dialog").close(); await loadEgress(); toast(lid ? "线路已更新" : "线路已创建");
-  } catch (err) { $("egress-error").textContent = err.message; } finally { e.submitter.disabled = false; }
+  } catch (err) { $("egress-form-error").textContent = err.message; } finally { e.submitter.disabled = false; }
 });
 $("egress-body").addEventListener("click", e => {
   const edit = e.target.closest("[data-egress-edit]");
@@ -540,7 +542,9 @@ function syncLogsTimer() {
 
 async function loadLogs(silent = false) {
   try {
-    requestLogs = await api("request-logs?limit=300");
+    // 取满 30 天。后端本来就只保留 30 天（REQUEST_LOG_RETENTION_DAYS），
+    // 上限 5000 条是内存缓冲；这里按 30 天的量要，而不是只拿 300 条。
+    requestLogs = await api("request-logs?limit=5000");
     $("log-error").hidden = true;
     renderLogs();
     const stampEl = $("logs-updated");
@@ -571,7 +575,20 @@ function renderLogs() {
   const rows = requestLogs || [];
   $("log-count").textContent = logNumber(rows.length);
   $("log-tokens").textContent = logNumber(rows.reduce((sum, r) => sum + (r.tokens || 0), 0));
-  $("log-credit").textContent = logCredit(rows.reduce((sum, r) => sum + (r.credit || 0), 0));
+  // 只算**今天 00:00 之后**的，且**不受筛选影响** —— 直接遍历全量
+  // 而不是 rows。跟「缓冲内请求 / 消耗 Token」那两张卡（跟着筛选走）不同：
+  // 这张卡回答的是「今天花了多少」，是当天的账单口径，不该被筛选条件改掉。
+  // 时间戳单位不统一（秒/毫秒都出现过），所以两种都认。
+  const dayStart = new Date();
+  dayStart.setHours(0, 0, 0, 0);
+  const since = dayStart.getTime();
+  const tsMs = r => {
+    const t = Number(r.ts ?? r.time ?? r.created ?? 0);
+    if (!t) return 0;
+    return t < 1e12 ? t * 1000 : t;      // < 1e12 视为秒级
+  };
+  const today = rows.filter(r => tsMs(r) >= since);
+  $("log-credit").textContent = logCredit(today.reduce((sum, r) => sum + (r.credit || 0), 0));
 
   // 按账号汇总：轮转是否均匀、有没有某个号在猛跑，一眼能看出来
   const byAccount = new Map();
@@ -668,6 +685,7 @@ function logGroupCell(r) {
   return `<span class="log-group-cell" title="${esc(g.ids.join("、"))}">${esc(g.label)}${g.ids.length > 1 ? `<small class="cell-note">(${g.ids.length} 组)</small>` : ""}</span>`;
 }
 
+
 function logRowsFiltered() {
   const account = $("log-account").value, model = $("log-model").value,
         outcome = $("log-outcome").value, group = $("log-group").value;
@@ -737,7 +755,7 @@ function applyLogFilter() {
   }
 }
 
-["log-account", "log-model", "log-outcome", "log-group"].forEach(id => $(id).addEventListener("change", applyLogFilter));
+["log-account", "log-model", "log-outcome", "log-group"].forEach(id => { if ($(id)) $(id).addEventListener("change", applyLogFilter); });
 $("log-clear-filter").addEventListener("click", () => {
   $("log-account").value = $("log-model").value = $("log-outcome").value = $("log-group").value = "all";
   applyLogFilter();
@@ -787,7 +805,6 @@ async function refresh() {
     // 自动任务流水同理：只在账号页拉，别让每次 30 秒轮询都多打一次接口。
     if (page === "accounts") await loadTaskLogs();
     // 计费页有成本：三个接口 + 两张表。同样只在当前页时才拉。
-    if (page === "billing") await loadBilling();
   }
   catch (e) { $("load-error").textContent = e.message; $("load-error").hidden = false; throw e; }
   finally { $("refresh").disabled = false; }
@@ -934,7 +951,7 @@ $("accounts-body").addEventListener("click", async e => {
   if (b.dataset.action === "toggle") confirmAction(a.enabled ? "暂停这个账号？" : "恢复这个账号？", "暂停后不参与新请求分配和自动签到，已开始的请求继续完成。恢复后重新参与轮转。", () => update({enabled:!a.enabled}));
   if (b.dataset.action === "delete") confirmAction("删除这个账号？", `「${a.name}」将从账号列表移除。服务器保留恢复副本。${a.active ? "当前调用账号将被清空。" : ""}`, () => api("accounts/" + a.id, {method:"DELETE"}));
 });
-$("keys-body").addEventListener("click", e => {
+function onKeyTableClick(e) {
   // 小眼睛：默认只显示掩码，点开才把明文写回单元格（不写进 HTML 属性以免被全选复制带走）。
   const eye = e.target.closest("[data-reveal]");
   if (eye) {
@@ -950,7 +967,9 @@ $("keys-body").addEventListener("click", e => {
     return;
   }
   const b = e.target.closest("[data-revoke]"); if (!b) return; const k = overview.keys.find(x => x.id === b.dataset.revoke); confirmAction("撤销客户端密钥？", `使用「${k.name}」的客户端将无法发起新请求。此操作不可撤销。`, () => api("keys/" + k.id, {method:"DELETE"}));
-});
+}
+// 两张表共用同一套行为（管理员密钥 / 用户自助密钥），overview.keys 里两者都在。
+$("keys-body").addEventListener("click", onKeyTableClick);
 /* 创建密钥弹窗里的分组勾选。每次打开重填一次，避免勾选状态跨次残留。 */
 function fillKeyGroups() {
   const groups = overview?.groups || [];
@@ -1007,231 +1026,6 @@ function fmtCredit(n) {
   return Number(n || 0).toLocaleString("zh-CN", {maximumFractionDigits: 3});
 }
 
-async function loadBilling() {
-  // 用户列表来自独立的 users 接口，不在 overview 里。
-  // 之前这里读 overview.users 拿到的是 undefined，下拉永远是空的 ——
-  // 而因为下拉空着不影响其它渲染，页面看着「差不多对」，只有充值时才发现选不到人。
-  const [stats, codes, flows, users] = await Promise.all([
-    api("billing/stats"),
-    api("billing/codes?limit=200&status=" + encodeURIComponent($("codes-status").value || "all")),
-    api("billing/flows?limit=200"),
-    api("users"),
-  ]);
-  const s = stats.stats || {};
-  $("bill-codes").textContent = s.codes_total ?? "—";
-  $("bill-used").textContent = s.codes_used ?? "—";
-  $("bill-issued").textContent = fmtCredit(s.credit_issued);
-  $("bill-outstanding").textContent = fmtCredit(s.credit_outstanding);
-  $("bill-balance").textContent = fmtCredit(s.balance_total);
-  renderCodes(codes.codes || []);
-  renderFlows(flows.flows || []);
-  // 用户下拉：只在选项变了才重建，否则每次轮询都会把用户选中的项弹回去。
-  const select = $("recharge-user");
-  const names = (Array.isArray(users) ? users : []).map(u => u.username);
-  const current = select.value;
-  const existing = [...select.options].map(o => o.value).filter(Boolean);
-  if (names.join("\u0000") !== existing.join("\u0000")) {
-    select.replaceChildren();
-    const blank = document.createElement("option");
-    blank.value = ""; blank.textContent = "选择用户…";
-    select.appendChild(blank);
-    for (const name of names) {
-      const option = document.createElement("option");
-      option.value = name; option.textContent = name;
-      select.appendChild(option);
-    }
-    if (names.includes(current)) select.value = current;
-  }
-}
-
-function renderCodes(rows) {
-  const body = $("codes-body");
-  body.replaceChildren();
-  $("codes-badge").textContent = rows.length;
-  $("codes-empty").hidden = rows.length > 0;
-  for (const row of rows) {
-    const tr = document.createElement("tr");
-    const tdId = document.createElement("td");
-    tdId.className = "mono muted";
-    tdId.textContent = row.id;
-    tdId.title = "只存了哈希，明文不可再取回";
-    tr.appendChild(tdId);
-    const tdBatch = document.createElement("td");
-    tdBatch.className = "mono muted";
-    tdBatch.textContent = row.batch;
-    tr.appendChild(tdBatch);
-    const tdAmount = document.createElement("td");
-    tdAmount.className = "align-right";
-    tdAmount.textContent = fmtCredit(row.credit);
-    tr.appendChild(tdAmount);
-    const tdState = document.createElement("td");
-    const used = Boolean(row.redeemed_at);
-    // 用页面统一的 .pill 口径，别自造一套 badge()。
-    const pill = document.createElement("span");
-    if (used) {
-      pill.className = "pill";
-      pill.textContent = "已核销 " + stamp(row.redeemed_at * 1000).slice(0, 10);
-    } else if (row.enabled === false) {
-      pill.className = "pill red";
-      pill.textContent = "已停用";
-    } else {
-      pill.className = "pill green";
-      pill.textContent = "未核销";
-    }
-    tdState.appendChild(pill);
-    tr.appendChild(tdState);
-    const tdBy = document.createElement("td");
-    tdBy.textContent = row.redeemed_by || "—";
-    tr.appendChild(tdBy);
-    const tdNote = document.createElement("td");
-    tdNote.className = "muted";
-    tdNote.textContent = row.note || "—";
-    tr.appendChild(tdNote);
-    const tdAct = document.createElement("td");
-    tdAct.className = "align-right";
-    if (!used && row.enabled !== false) {
-      const button = document.createElement("button");
-      button.className = "text-button";
-      button.textContent = "停用";
-      button.addEventListener("click", async () => {
-        try {
-          await api("billing/codes/" + encodeURIComponent(row.id) + "/disable", {method: "POST"});
-          toast("已停用该兑换码");
-          await loadBilling();
-        } catch (error) { toast(error.message); }
-      });
-      tdAct.appendChild(button);
-    } else {
-      tdAct.textContent = "—";
-    }
-    tr.appendChild(tdAct);
-    body.appendChild(tr);
-  }
-}
-
-function renderFlows(rows) {
-  const body = $("flows-body");
-  body.replaceChildren();
-  $("flows-badge").textContent = rows.length;
-  $("flows-none").hidden = rows.length > 0;
-  const LABEL = {recharge: "充值", redeem: "兑换", spend: "消费"};
-  for (const row of rows) {
-    const tr = document.createElement("tr");
-    const tdTime = document.createElement("td");
-    tdTime.className = "mono muted";
-    tdTime.textContent = stamp(row.ts * 1000);
-    tr.appendChild(tdTime);
-    const tdUser = document.createElement("td");
-    tdUser.textContent = row.username || "—";
-    tr.appendChild(tdUser);
-    const tdKind = document.createElement("td");
-    tdKind.textContent = LABEL[row.kind] || row.kind || "—";
-    tr.appendChild(tdKind);
-    const amount = Number(row.credit || 0);
-    const tdAmount = document.createElement("td");
-    tdAmount.className = "align-right " + (amount >= 0 ? "amount-pos" : "amount-neg");
-    tdAmount.textContent = (amount > 0 ? "+" : "") + fmtCredit(amount);
-    tr.appendChild(tdAmount);
-    const tdBalance = document.createElement("td");
-    tdBalance.className = "align-right muted";
-    tdBalance.textContent = fmtCredit(row.balance);
-    tr.appendChild(tdBalance);
-    const tdNote = document.createElement("td");
-    tdNote.className = "muted";
-    tdNote.textContent = row.note || "—";
-    tr.appendChild(tdNote);
-    body.appendChild(tr);
-  }
-}
-
-$("recharge-form").addEventListener("submit", async event => {
-  event.preventDefault();
-  const username = $("recharge-user").value;
-  const credit = Number($("recharge-credit").value);
-  if (!username) { toast("请先选择用户"); return; }
-  if (!Number.isFinite(credit) || credit <= 0) { toast("充值金额必须大于 0"); return; }
-  const button = event.submitter || $("recharge-form").querySelector("button");
-  button.disabled = true;
-  try {
-    const result = await api("billing/recharge", {method: "POST", body: {
-      username, credit, note: $("recharge-note").value.trim(),
-    }});
-    $("recharge-result").hidden = false;
-    $("recharge-result").textContent = `已为 ${username} 充值 ${fmtCredit(credit)} 积分，当前余额 ${fmtCredit(result.credit)}。`;
-    $("recharge-credit").value = ""; $("recharge-note").value = "";
-    await loadBilling();
-  } catch (error) { toast(error.message); } finally { button.disabled = false; }
-});
-
-$("codes-form").addEventListener("submit", async event => {
-  event.preventDefault();
-  const count = Number($("codes-count").value);
-  const credit = Number($("codes-credit").value);
-  if (!Number.isFinite(credit) || credit <= 0) { toast("每张面额必须大于 0"); return; }
-  const button = event.submitter || $("codes-form").querySelector("button");
-  button.disabled = true;
-  try {
-    const result = await api("billing/codes", {method: "POST", body: {
-      count, credit, note: $("codes-note").value.trim(),
-    }});
-    showGeneratedCodes(result);
-    await loadBilling();
-  } catch (error) { toast(error.message); } finally { button.disabled = false; }
-});
-
-/** 明文只此一次：给复制按钮，也给下载 —— 手工抄 100 张码是不现实的。 */
-function showGeneratedCodes(result) {
-  const box = $("codes-output");
-  box.hidden = false;
-  box.replaceChildren();
-  const head = document.createElement("div");
-  head.className = "codes-head";
-  const title = document.createElement("strong");
-  title.textContent = `已生成 ${result.count} 张 × ${fmtCredit(result.credit)} 积分（批次 ${result.batch}）`;
-  const hint = document.createElement("span");
-  hint.className = "muted";
-  hint.textContent = " 明文只显示这一次，离开本页就再也取不回来。";
-  head.append(title, hint);
-  box.appendChild(head);
-
-  const list = document.createElement("textarea");
-  list.className = "codes-list";
-  list.readOnly = true;
-  list.rows = Math.min(12, result.codes.length + 1);
-  list.value = result.codes.join("\n");
-  box.appendChild(list);
-
-  const actions = document.createElement("div");
-  actions.className = "codes-actions";
-  const copy = document.createElement("button");
-  copy.className = "text-button";
-  copy.textContent = "复制全部";
-  copy.addEventListener("click", async () => {
-    try {
-      await navigator.clipboard.writeText(result.codes.join("\n"));
-      toast("已复制 " + result.codes.length + " 张兑换码");
-    } catch { list.select(); toast("浏览器拒绝了剪贴板，已为你全选，请按 Ctrl+C"); }
-  });
-  const download = document.createElement("button");
-  download.className = "text-button";
-  download.textContent = "下载 .txt";
-  download.addEventListener("click", () => {
-    // 前缀 \ufeff：Excel / 记事本打开中文备注时不会乱码。
-    const blob = new Blob(["\ufeff" + result.codes.join("\r\n")], {type: "text/plain;charset=utf-8"});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `兑换码-${result.batch}-${result.count}张-${fmtCredit(result.credit)}积分.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
-  });
-  actions.append(copy, download);
-  box.appendChild(actions);
-}
-
-$("codes-status").addEventListener("change", () => { loadBilling().catch(e => toast(e.message)); });
-
-
 
 (async () => { await applyLoginOptions(); try { const s = await api("session"); csrf = s.csrf; await enter(); } catch (e) { if (!csrf) showLogin(); } })();
 
@@ -1278,217 +1072,11 @@ async function loadSession() {
   return sessionInfo;
 }
 
-async function loadMembers(page) {
-  if (typeof page === "number") membersState.page = page;
-  const warn = $("mem-warn");
-  warn.hidden = true;
-  try {
-    await loadSession();
-    const query = "members?page=" + membersState.page + "&size=" + membersState.size +
-                  (membersState.q ? "&q=" + encodeURIComponent(membersState.q) : "");
-    const [list, stats] = await Promise.all([api(query), api("members/stats")]);
-    membersState.items = list.items || [];
-    membersState.total = list.total || 0;
-    membersState.pages = list.pages || 1;
-    renderMembers(list);
-    renderMemberStats(stats);
-    if (list.truncated) {
-      // 扫描被截断时说清楚：管理员不该以为「列表里没有 = 系统里没有」。
-      warn.textContent = "用户数超过 " + (list.scanned || 0) + " 条，本次只扫描了前 " +
-                         (list.scanned || 0) + " 条，结果可能不完整。";
-      warn.hidden = false;
-    }
-  } catch (error) {
-    warn.textContent = "读取用户列表失败：" + error.message;
-    warn.hidden = false;
-  }
-}
-
-function renderMemberStats(s) {
-  $("mem-total").textContent = s.total ?? 0;
-  $("mem-active").textContent = s.active ?? 0;
-  $("mem-disabled").textContent = s.disabled ?? 0;
-  $("mem-admins").textContent = s.admins ?? 0;
-  $("mem-balance").textContent = fmtCredit(s.balance_credit);
-  const box = $("mem-orphans");
-  const orphans = s.orphan_keys || 0;
-  if (orphans > 0) {
-    // 孤儿密钥 = 「钱记在没人认领的桶里」。必须显式提示，否则账目对不上也没人知道。
-    box.textContent = "有 " + orphans + " 枚密钥的归属指向了不存在的用户（孤儿密钥）。" +
-                      "它们仍能调用接口，但余额记在一个没人认领的桶里，也无法兑换 —— " +
-                      "请到「API 密钥」页把这些密钥的归属改到一个真实用户上。";
-    box.hidden = false;
-  } else {
-    box.hidden = true;
-  }
-}
-
-function renderMembers(list) {
-  const body = $("mem-body");
-  body.replaceChildren();
-  $("mem-badge").textContent = membersState.total;
-  $("mem-empty").hidden = membersState.items.length > 0;
-  $("mem-page").textContent = "第 " + membersState.page + " / " + membersState.pages + " 页";
-  $("mem-prev").disabled = membersState.page <= 1;
-  $("mem-next").disabled = membersState.page >= membersState.pages;
-
-  const funds = canManageFunds();
-
-  for (const m of membersState.items) {
-    const tr = document.createElement("tr");
-
-    const tdEmail = document.createElement("td");
-    const strong = document.createElement("strong");
-    strong.textContent = m.email || "—";
-    tdEmail.appendChild(strong);
-    if (!m.email_verified) {
-      const note = document.createElement("small");
-      note.className = "cell-note";
-      note.textContent = "邮箱未验证";
-      tdEmail.appendChild(note);
-    }
-    const idNote = document.createElement("small");
-    idNote.className = "cell-note mono";
-    idNote.textContent = m.id || "";
-    tdEmail.appendChild(idNote);
-    tr.appendChild(tdEmail);
-
-    const tdRole = document.createElement("td");
-    tdRole.textContent = ROLE_LABEL[m.role] || m.role || "—";
-    tr.appendChild(tdRole);
-
-    const tdStatus = document.createElement("td");
-    const [statusText, tone] = MEMBER_STATUS[m.status] || [m.status || "—", ""];
-    const pill = document.createElement("span");
-    pill.className = "pill " + tone;
-    pill.textContent = statusText;
-    tdStatus.appendChild(pill);
-    tr.appendChild(tdStatus);
-
-    const tdBal = document.createElement("td");
-    tdBal.className = "align-right mono credit-number";
-    tdBal.textContent = fmtCredit(m.balance_credit);
-    tr.appendChild(tdBal);
-
-    const tdKeys = document.createElement("td");
-    tdKeys.textContent = m.key_count ? m.key_count + " 枚" : "—";
-    if (m.key_names && m.key_names.length) tdKeys.title = m.key_names.join("、");
-    tr.appendChild(tdKeys);
-
-    const tdLogin = document.createElement("td");
-    tdLogin.className = "muted mono";
-    tdLogin.textContent = m.last_login_at ? stamp(m.last_login_at * 1000) : "还没登录过";
-    tr.appendChild(tdLogin);
-
-    const tdActions = document.createElement("td");
-    tdActions.className = "align-right";
-    const actions = document.createElement("div");
-    actions.className = "actions";
-
-    const detail = document.createElement("button");
-    detail.textContent = "详情";
-    detail.addEventListener("click", () => openMemberDetail(m.id));
-    actions.appendChild(detail);
-
-    const role = document.createElement("button");
-    role.textContent = m.role === "admin" ? "设为普通" : "设为管理员";
-    role.addEventListener("click", () => patchMember(m,
-      {role: m.role === "admin" ? "user" : "admin"},
-      "把「" + m.email + "」的角色改为" + (m.role === "admin" ? "普通用户" : "管理员") + "？"));
-    actions.appendChild(role);
-
-    const toggle = document.createElement("button");
-    toggle.textContent = m.status === "disabled" ? "启用" : "禁用";
-    toggle.addEventListener("click", () => patchMember(m,
-      {status: m.status === "disabled" ? "active" : "disabled"},
-      (m.status === "disabled" ? "启用" : "禁用") + "「" + m.email + "」？" +
-      (m.status === "disabled" ? "" : "禁用后该账号无法登录，但名下密钥仍可调用接口。")));
-    actions.appendChild(toggle);
-
-    const balance = document.createElement("button");
-    balance.textContent = "余额";
-    balance.disabled = !funds;
-    if (!funds) balance.title = TOKEN_LIMIT_NOTE;
-    balance.addEventListener("click", () => openBalance(m));
-    actions.appendChild(balance);
-
-    const del = document.createElement("button");
-    del.className = "danger";
-    del.textContent = "删除";
-    del.disabled = !funds;
-    if (!funds) del.title = TOKEN_LIMIT_NOTE;
-    del.addEventListener("click", () => deleteMember(m));
-    actions.appendChild(del);
-
-    tdActions.appendChild(actions);
-    tr.appendChild(tdActions);
-    body.appendChild(tr);
-  }
-}
 
 /** 改角色 / 启停。不在前端复刻业务规则（至少留一个管理员、不能改自己…）——
  *  那些规则属于服务端，前端抄一份就是多一份会漂移的副本。
  *  但要把服务端的原话透出来，管理员才知道为什么不行。 */
-function patchMember(member, patch, prompt) {
-  confirmAction("确认操作", prompt, async () => {
-    const result = await api("members/" + encodeURIComponent(member.id), {method: "PATCH", body: patch});
-    let message = "已更新「" + member.email + "」。";
-    if (result.relogin_required) message += "该用户的登录已失效，需要重新登录。";
-    if (result.sessions_revoked) message += "（已吊销 " + result.sessions_revoked + " 个会话）";
-    await loadMembers();
-    return message;
-  });
-}
 
-async function openMemberDetail(uid) {
-  const dialog = $("mem-detail-dialog");
-  const body = $("mem-detail-body");
-  body.replaceChildren();
-  $("mem-detail-title").textContent = "用户详情";
-  $("mem-detail-sub").textContent = "读取中…";
-  dialog.showModal();
-  try {
-    const d = await api("members/" + encodeURIComponent(uid) + "?flows=50");
-    $("mem-detail-title").textContent = d.email || "(无邮箱)";
-    $("mem-detail-sub").textContent = "用户 ID " + (d.id || "—") +
-      " · 余额 " + fmtCredit(d.balance_credit) + " 积分";
-
-    body.appendChild(detailSection("基本信息", [
-      ["邮箱", d.email || "—"],
-      ["邮箱验证", d.email_verified ? "已验证" : "未验证"],
-      ["角色", ROLE_LABEL[d.role] || d.role || "—"],
-      ["状态", (MEMBER_STATUS[d.status] || [d.status])[0] || "—"],
-      ["注册时间", d.created_at ? stamp(d.created_at * 1000) : "—"],
-      ["最近登录", d.last_login_at ? stamp(d.last_login_at * 1000) : "还没登录过"],
-      ["余额", fmtCredit(d.balance_credit) + " 积分（" + (d.balance_milli ?? 0) + " 厘）"],
-    ]));
-
-    const keys = d.keys || [];
-    body.appendChild(detailSection("名下密钥（" + keys.length + "）",
-      keys.length ? keys.map(k => [k.name || "(未命名)",
-        (k.prefix || "—") + " · " + (k.enabled ? "启用中" : "已停用") +
-        " · 创建于 " + (k.created ? stamp(k.created * 1000) : "—") +
-        (k.last_used_at ? " · 最近使用 " + stamp(k.last_used_at * 1000) : " · 未使用过")])
-        : [["—", "该用户名下还没有 API 密钥"]]));
-
-    const flows = d.flows || [];
-    body.appendChild(detailSection("最近流水（" + flows.length + "）",
-      flows.length ? flows.slice(0, 50).map(f => {
-        const amount = Number(f.credit || 0);
-        // 金额直接用服务端的 credit，不自己做 milli/1000 —— 浮点舍入口径
-        // 一旦与服务端不同，同一条流水在两端就会显示成两个数。
-        return [stamp((f.ts || 0) * 1000),
-          (amount > 0 ? "+" : "") + fmtCredit(amount) + " 积分 · 余额 " + fmtCredit(f.balance) +
-          " · " + (f.note || "无说明")];
-      }) : [["—", "还没有流水"]]));
-  } catch (error) {
-    $("mem-detail-sub").textContent = "";
-    const p = document.createElement("p");
-    p.className = "banner warning";
-    p.textContent = "读取详情失败：" + error.message;
-    body.appendChild(p);
-  }
-}
 
 function detailSection(title, rows) {
   const wrap = document.createElement("section");
@@ -1509,115 +1097,6 @@ function detailSection(title, rows) {
   return wrap;
 }
 
-function openBalance(member) {
-  if (!canManageFunds()) { toast(TOKEN_LIMIT_NOTE); return; }
-  const dialog = $("mem-balance-dialog");
-  $("mem-balance-who").textContent = "用户：" + member.email +
-    "（当前余额 " + fmtCredit(member.balance_credit) + " 积分）";
-  $("mem-balance-delta").value = "";
-  $("mem-balance-reason").value = "";
-  $("mem-balance-error").hidden = true;
-  dialog.dataset.uid = member.id;
-  dialog.showModal();
-  $("mem-balance-delta").focus();
-}
-
-async function submitBalance() {
-  const dialog = $("mem-balance-dialog");
-  const uid = dialog.dataset.uid;
-  const button = $("mem-balance-submit");
-  const errorBox = $("mem-balance-error");
-  errorBox.hidden = true;
-  const delta = $("mem-balance-delta").value.trim();
-  if (!delta) { errorBox.textContent = "请填写要调整的积分数量。"; errorBox.hidden = false; return; }
-  button.disabled = true;
-  button.textContent = "提交中…";
-  try {
-    const result = await api("members/" + encodeURIComponent(uid) + "/balance",
-      {method: "POST", body: {delta_credit: Number(delta), reason: $("mem-balance-reason").value.trim()}});
-    toast("已调整，当前余额 " + fmtCredit(result.balance_credit) + " 积分。");
-    dialog.close();
-    await loadMembers();
-  } catch (error) {
-    errorBox.textContent = error.message;
-    errorBox.hidden = false;
-  } finally {
-    button.disabled = false;
-    button.textContent = "确认调整";
-  }
-}
-
-async function deleteMember(member) {
-  if (!canManageFunds()) { toast(TOKEN_LIMIT_NOTE); return; }
-  const hasBalance = Number(member.balance_credit || 0) !== 0;
-  const keyNote = member.key_count
-    ? "该用户名下有 " + member.key_count + " 枚密钥，删除后它们会变成无主密钥（仍能调用，但余额归零且无法兑换）。"
-    : "该用户名下没有密钥。";
-  const balanceNote = hasBalance
-    ? "⚠️ 该用户还有 " + fmtCredit(member.balance_credit) + " 积分余额，删除会吞掉这笔钱；" +
-      "系统会记一笔结清流水，账面仍然平。"
-    : "";
-  confirmAction("删除用户",
-    "确定删除「" + member.email + "」？" + keyNote + balanceNote + "这是不可撤销的操作。",
-    async () => {
-      const result = await api("members/" + encodeURIComponent(member.id) + (hasBalance ? "?force=1" : ""),
-                              {method: "DELETE"});
-      let message = "已删除「" + (result.email || member.email) + "」。";
-      if (result.keys_unbound) message += " 解绑了 " + result.keys_unbound + " 枚密钥。";
-      if (Number(result.released_credit || 0)) message += " 结清了 " + fmtCredit(result.released_credit) + " 积分。";
-      await loadMembers();
-      return message;
-    });
-}
-
-/* ── 分发账号 ─────────────────────────────────────────────────────
-   为什么这个入口是必须的：未配置 SMTP 且开着验证码时**任何人都注册不了**，
-   而登录页那句提示的原文就写着「或者给您分发账号登录」——
-   管理员照着一个自己解决不了的建议去做、却无处可去，这个入口就是补这个洞。 */
-$("mem-add").addEventListener("click", () => {
-  $("mem-new-email").value = "";
-  $("mem-new-password").value = "";
-  $("mem-new-role").value = "user";
-  $("mem-add-error").hidden = true;
-  $("mem-add-dialog").showModal();
-  $("mem-new-email").focus();
-});
-$("mem-empty-add").addEventListener("click", () => $("mem-add").click());
-
-$("mem-add-submit").addEventListener("click", async () => {
-  const button = $("mem-add-submit");
-  const errorBox = $("mem-add-error");
-  errorBox.hidden = true;
-  const email = $("mem-new-email").value.trim();
-  const password = $("mem-new-password").value;
-  if (!email || !password) { errorBox.textContent = "请填写邮箱和初始密码。"; errorBox.hidden = false; return; }
-  button.disabled = true;
-  button.textContent = "创建中…";
-  try {
-    const created = await api("members", {method: "POST",
-      body: {email, password, role: $("mem-new-role").value, email_verified: true}});
-    toast("已创建用户「" + created.email + "」，可以把邮箱和初始密码发给对方了。");
-    $("mem-add-dialog").close();
-    await loadMembers();
-  } catch (error) {
-    errorBox.textContent = error.message;
-    errorBox.hidden = false;
-  } finally {
-    button.disabled = false;
-    button.textContent = "创建";
-  }
-});
-
-$("mem-refresh").addEventListener("click", () => loadMembers());
-$("mem-prev").addEventListener("click", () => loadMembers(membersState.page - 1));
-$("mem-next").addEventListener("click", () => loadMembers(membersState.page + 1));
-$("mem-search").addEventListener("input", event => {
-  membersState.q = event.target.value.trim();
-  membersState.page = 1;
-  clearTimeout($("mem-search").timer);
-  $("mem-search").timer = setTimeout(() => loadMembers(), 300);
-});
-$("mem-balance-submit").addEventListener("click", submitBalance);
 
 /* ══════════════════════════════════════════════════════════════════
    服务设置
@@ -1625,9 +1104,6 @@ $("mem-balance-submit").addEventListener("click", submitBalance);
    读写同一份 settings_store。**PUT 是浅合并**（实测确认）：
    只发「改动的键」，绝不整份回传 —— 整份回传会让网页端与桌面端
    各自拼的对象互相覆盖，表现成「网页端刚改完，桌面端那边没了」。
-
-   smtp.password 的语义：**不传 = 不改，传 "" = 清空**。
-   所以留空时**不把这个键放进请求体**。
    ══════════════════════════════════════════════════════════════════ */
 
 let settingsCache = null;
@@ -1646,36 +1122,7 @@ async function loadSettings() {
 }
 
 function renderSettings(s) {
-  const smtp = s.smtp || {};
-  $("set-allow-register").checked = Boolean(s.allow_register);
-  $("set-require-code").checked = Boolean(s.require_email_code);
-  $("set-self-redeem").checked = Boolean(s.allow_self_service_redeem);
   $("set-site-name").value = s.site_name || "";
-  $("set-email-subject").value = s.email_subject || "";
-  $("set-email-body").value = s.email_body || "";
-
-  $("set-smtp-enabled").checked = Boolean(smtp.enabled);
-  $("set-smtp-host").value = smtp.host || "";
-  $("set-smtp-port").value = smtp.port || 465;
-  $("set-smtp-username").value = smtp.username || "";
-  $("set-smtp-from").value = smtp.from_addr || "";
-  $("set-smtp-ssl").checked = smtp.use_ssl !== false;
-  // 口令永不回显：只告诉管理员「配过没有」。
-  $("set-smtp-password").value = "";
-  $("set-smtp-password").placeholder = smtp.has_password ? "已配置 · 留空表示不修改" : "尚未配置";
-  $("set-smtp-pw-state").textContent = "口令状态：" + (smtp.has_password ? "已配置" : "未配置");
-
-  // 危险组合必须在设置页当场说清，而不是等用户去注册时才发现。
-  // 文案直接绑定服务端的 register_locked_reason，不自己拼 ——
-  // 将来管理员改了规则，登录页与这里会自动同步。
-  const box = $("set-smtp-warning");
-  const reason = s.register_locked_reason || "";
-  if (reason) {
-    box.textContent = "⚠️ 当前配置会让所有人都无法注册：" + reason;
-    box.hidden = false;
-  } else {
-    box.hidden = true;
-  }
 }
 
 function settingsFeedback(message, ok) {
@@ -1701,71 +1148,11 @@ async function patchSettings(patch, okMessage, button) {
   }
 }
 
-$("set-register-form").addEventListener("submit", event => {
+$("set-profile-form").addEventListener("submit", event => {
   event.preventDefault();
   patchSettings({
-    allow_register: $("set-allow-register").checked,
-    require_email_code: $("set-require-code").checked,
-    allow_self_service_redeem: $("set-self-redeem").checked,
     site_name: $("set-site-name").value.trim(),
-  }, "注册与站点设置已保存。", $("set-register-submit"));
+  }, "服务设置已保存。", $("set-profile-submit"));
 });
 
-$("set-smtp-form").addEventListener("submit", event => {
-  event.preventDefault();
-  const smtp = {
-    enabled: $("set-smtp-enabled").checked,
-    host: $("set-smtp-host").value.trim(),
-    port: Number($("set-smtp-port").value) || 465,
-    username: $("set-smtp-username").value.trim(),
-    from_addr: $("set-smtp-from").value.trim(),
-    use_ssl: $("set-smtp-ssl").checked,
-  };
-  // 口令留空 = 不修改（不放这个键）；填了才传。
-  // 「不传」与「传空串」是两种完全不同的意图，不能混。
-  const password = $("set-smtp-password").value;
-  if (password) smtp.password = password;
-  patchSettings({smtp}, password ? "发信设置已保存（口令已更新）。" : "发信设置已保存。",
-                $("set-smtp-submit"));
-});
 
-$("set-template-form").addEventListener("submit", event => {
-  event.preventDefault();
-  patchSettings({
-    email_subject: $("set-email-subject").value,
-    email_body: $("set-email-body").value,
-  }, "邮件模板已保存。", $("set-template-submit"));
-});
-
-$("set-smtp-test").addEventListener("click", async () => {
-  const button = $("set-smtp-test");
-  const note = $("set-smtp-test-note");
-  button.disabled = true;
-  button.textContent = "发送中…";
-  note.hidden = false;
-  note.className = "fine";
-  note.textContent = "正在连接 SMTP 服务器…";
-  try {
-    const body = {};
-    const to = $("set-smtp-test-to").value.trim() || $("set-smtp-username").value.trim();
-    if (to) body.to = to;
-    const password = $("set-smtp-password").value;
-    if (password) body.password = password;
-    const result = await api("settings/smtp-test", {method: "POST", body});
-    if (result.ok) {
-      note.className = "fine ok";
-      note.textContent = "测试邮件已发送到 " + (result.to || to || "（未指定收件人）") + "。";
-    } else {
-      // 失败原因的键是 error，不是 message。
-      // 两个键都读，免得换个版本键名一变就退化成一句没信息量的「失败」。
-      note.className = "fine error";
-      note.textContent = "发送失败：" + (result.error || result.message || "未知原因");
-    }
-  } catch (error) {
-    note.className = "fine error";
-    note.textContent = "发送失败：" + error.message;
-  } finally {
-    button.disabled = false;
-    button.textContent = "发送测试邮件";
-  }
-});

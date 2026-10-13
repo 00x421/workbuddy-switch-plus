@@ -368,200 +368,16 @@ export type RpEgressPayload = {
   stale: string[];
 };
 
-// ── 终端用户（members）────────────────────────────────────────────────
-//
-// ⚠️ 与上面的 RpUser 是两套完全不同的东西，别混：
-//   · `RpUser`（`/admin/api/users`）= 后台账号：username + role ∈ admin/viewer，
-//     用来登录 8787 管理后台。桌面端已有 UsersPanel。
-//   · `RpMember`（`/admin/api/members`）= 用户管理：邮箱注册的终端用户，
-//     有积分余额、是 API 调用的计费主体。
-// 界面上分别叫「后台账号」与「用户管理」。
-
-/** 终端用户角色。与后台账号的 admin/viewer 不是一套取值。 */
-export type RpMemberRole = "user" | "admin";
-/** 终端用户状态。 */
-export type RpMemberStatus = "active" | "disabled";
-
-export type RpMember = {
-  id: string;
-  email: string;
-  role: RpMemberRole | string;
-  status: RpMemberStatus | string;
-  email_verified: boolean;
-  /**
-   * 余额的权威单位是整数「厘」（1 积分 = 1000 厘）。
-   * 界面显示一律用 balance_credit，不要自己拿 milli 去除 —— 除法的舍入
-   * 口径在服务端（redemption.from_milli），前端再除一次就会与网页端不一致。
-   */
-  balance_milli: number;
-  balance_credit: number;
-  created_at: number | null;
-  last_login_at: number | null;
-  /** 名下 API 密钥数量。密钥明细在详情的 keys 里。 */
-  key_count: number;
-  key_names: string[];
-};
-
-/** 无主密钥：owner 非空但已经对不上任何终端用户。它们在跑、在消耗上游，钱却没人认领。 */
-export type RpOrphanKeys = { owner: string; count: number; names: string[] };
-
-export type RpMemberList = {
-  items: RpMember[];
-  total: number;
-  page: number;
-  size: number;
-  pages: number;
-  /** 命中数超过服务端扫描上限，结果被截断。 */
-  truncated: boolean;
-  scanned: number;
-  orphan_keys: RpOrphanKeys[];
-};
-
-export type RpMemberKeys = {
-  id: string; name: string; prefix: string; enabled: boolean;
-  created: number | null; last_used_at: number | null;
-};
-
-/**
- * 一条积分流水。字段名与 `redemption.list_flows` 的实际输出一字不差
- * （已在真机 8961 上抓过响应核对），两端共用同一份。
- *
- * 注意这里同时有 `milli` 和 `credit`：`milli` 是权威整数（厘），
- * `credit` 是服务端舍入好的积分数。界面直接用 `credit` —— 前端再除一次 1000，
- * 舍入口径一旦和服务端不一致，同一条流水在两端就会显示成两个数。
- */
-export type RpMemberFlow = {
-  /** Unix 秒。 */
-  ts: number;
-  /** 归属用户（uid）—— 明细里恒等于当前用户，列出来便于排查串号。 */
-  username?: string;
-  kind: string;
-  /** 变动量，单位厘**。正数入账、负数出账。 */
-  milli: number;
-  /** 变动量，单位积分**（服务端舍入结果）。 */
-  credit?: number;
-  /** 变动后余额，单位厘。 */
-  balance?: number;
-  note?: string;
-  /** 谁操作的：uid 或后台账号名。 */
-  actor?: string;
-  ref?: string;
-};
-
-export type RpMemberDetail = RpMember & {
-  keys: RpMemberKeys[];
-  flows: RpMemberFlow[];
-};
-
-export type RpMemberStats = {
-  total: number; active: number; disabled: number; admins: number;
-  balance_milli: number; balance_credit: number;
-  keys_total: number; orphan_keys: number;
-};
-
-/** 调余额的返回。delta_credit 回显本次增量，便于界面做二次确认文案。 */
-export type RpBalanceResult = {
-  id: string; balance_milli: number; balance_credit: number; delta_credit: number;
-};
-
-export type RpDeleteMemberResult = {
-  ok: boolean; id: string; email: string;
-  /** 解绑（不是删除**）的密钥数。删除后它们成为无主密钥，仍在消耗上游。 */
-  keys_unbound: number;
-  /** 强制删除时结清的余额（积分）。 */
-  released_credit: number;
-};
-
 // ── 服务设置（/admin/api/settings）──────────────────────────────────────
 
-export type RpSmtpSettings = {
-  enabled: boolean;
-  host: string;
-  port: number;
-  username: string;
-  /**
-   * 服务端只回显布尔「是否已配置」，绝不回显明文或密文。
-   * 字段名 `has_password` 与服务端 `settings_store.view()` 一字不差。
-   */
-  has_password?: boolean;
-  from_addr: string;
-  use_ssl: boolean;
-};
-
 export type RpServiceSettings = {
-  /**
-   * 用户系统总闸。关掉后注册 / 登录 / 用户中心的会话身份
-   * 全部不可用（403）。
-   *
-   * 边界：不影响 /v1 的 API Key 直连 —— 那是核心服务，不归这个闸管。
-   * 已经发出去的密钥在总闸关闭后照常能用，否则这个开关就成了停机按钮。
-   */
-  user_system_enabled?: boolean;
-  allow_register: boolean;
-  require_email_code: boolean;
-  smtp: RpSmtpSettings;
   site_name: string;
-  allow_self_service_redeem: boolean;
-  /** 邮件主题模板（两端共用）。 */
-  email_subject?: string;
-  /** 邮件正文模板。 */
-  email_body?: string;
-  /**
-   * SMTP 是否真的可用（服务端判定的唯一真相源）。
-   *
-   * 必须用它来显示「已配置 / 未配置」，不要自己在界面上按 host 非空去猜 ——
-   * 那就成了第二个真相源，会出现「页面说已配置、注册却说未配置 SMTP」的自相矛盾。
-   */
-  smtp_ready?: boolean;
-  /**
-   * 当前配置会导致「谁都注册不了」时，服务端给出的原因原文。
-   * 非空 = 注册被锁死。这就是用户要的那句提示的来源。
-   */
-  register_locked_reason?: string;
+  /** 设置加密密钥的来源（环境变量 / 本机文件），便于排查。 */
+  settings_key_source?: string;
 };
-
-/**
- * 测试发信的返回。
- *
- * 成功与失败用的是两个不同的键（来自 `mailer.send_test()`）：
- *   失败 → `{ok:false, error:"未配置 SMTP 主机"}`
- *   成功 → `{ok:true,  to:"<收件人>"}`
- * 两个键都声明成可选，取值一律走下面的 `smtpTestMessage()` ——
- * 只读一个键（比如只读 `message`）会让失败时弹一句没有信息量的「测试失败」，
- * 而管理员最需要的恰恰是「为什么失败」：没配主机？端口错？认证被拒？
- */
-export type RpSmtpTestResult = {
-  ok: boolean;
-  /** 失败时的原因。这才是失败时该显示的文案。** */
-  error?: string;
-  /** 成功时的收件人。 */
-  to?: string;
-  /** 兼容旧版 / 其它实现可能用的字段名。 */
-  message?: string;
-};
-
-/** 从测试发信结果里取出要显示的一句话（成功与失败都适用）。 */
-export function smtpTestMessage(result: RpSmtpTestResult | null | undefined): string {
-  if (!result) return "测试发信失败";
-  if (result.ok) {
-    return result.to ? "测试邮件已发往 " + result.to : "测试邮件已发出";
-  }
-  // 优先显示服务端给的原因；都没有才退回一句兜底文案。
-  return result.error || result.message || "测试发信失败";
-}
 
 export type RpSettingsPatch = {
-  /** 用户系统总闸。见 RpServiceSettings.user_system_enabled。 */
-  user_system_enabled?: boolean;
-  allow_register?: boolean;
-  require_email_code?: boolean;
   site_name?: string;
-  allow_self_service_redeem?: boolean;
-  /**
-   * 浅合并：只更新这里出现过的子键。
-   * 不传 password = 不改密码；传 "" = 清空密码。
-   */
-  smtp?: Partial<RpSmtpSettings> & { password?: string };
 };
 
 // ── 接口 ──────────────────────────────────────────────────────────────
@@ -669,83 +485,11 @@ export const rp = {
   assignEgress: (accountId: string, lineId: string) =>
     request<{ ok: boolean; lines: RpEgressLine[] }>("egress/assign", { method: "POST", body: { account_id: accountId, line_id: lineId } }),
 
-  // ── 用户管理（终端用户 / members）────────────────────────────────────
-  //
-  // ⚠️ 这些不是上面那组 listUsers / addUser / updateUser / deleteUser。
-  // 那组打的是 `/admin/api/users`，管的是后台账号（登录 8787 用的 username）。
-  // 这组打的是 `/admin/api/members`，管的是邮箱注册的终端用户（有积分余额）。
-  // 两套东西永不共用端点。
-  //
-  // 守卫分档（服务端实现）：
-  //   · 列表 / 详情 → viewer：只读角色也能看
-  //   · 改角色 / 启停 → admin
-  //   · 调余额 / 删用户 → require_session_admin：拒绝 wbt_ 令牌身份
-  // 所以桌面端用「账号密码登录」换来的会话令牌调用全部可用（见 lib 顶部注释：
-  // `X-Admin-Token` 头走的是 `security.current_user`，与 cookie 等价）；
-  // 但用「管理令牌」登录时，调余额 / 删用户会被 403 —— 这是有意的，
-  // 界面要把那句 403 原样显示出来，不要吞掉。
-  /**
-   * 管理员分发账号（`POST /admin/api/members`）。
-   *
-   * 这条是「未配置 SMTP 时用户注册不了」的唯一出路 —— 那句提示的原文就是
-   * 「或者给您分发账号登录」。所以它必须和「关闭验证码注册」一起出现在服务设置旁边，
-   * 否则管理员看到提示却无处可去。
-   *
-   * 守卫是 `admin`（不是 session_admin）：建号能造出管理员，但可逆（能删能降级）。
-   * 服务端默认 `email_verified=true` —— 管理员亲手分发等于已经确认过身份，
-   * 不存在「验证过没有」的问题。
-   */
-  createMember: (body: { email: string; password: string; role?: string; email_verified?: boolean }) =>
-    request<RpMember>("members", { method: "POST", body }),
-  listMembers: (params: { q?: string; page?: number; size?: number } = {}) => {
-    const search = new URLSearchParams();
-    if (params.q) search.set("q", params.q);
-    if (params.page) search.set("page", String(params.page));
-    if (params.size) search.set("size", String(params.size));
-    const query = search.toString();
-    return request<RpMemberList>("members" + (query ? "?" + query : ""));
-  },
-  memberStats: () => request<RpMemberStats>("members/stats"),
-  /** 详情带名下密钥与最近流水；flows 是流水条数上限（服务端封顶 200）。 */
-  memberDetail: (uid: string, flows = 50) =>
-    request<RpMemberDetail>("members/" + encodeURIComponent(uid) + "?flows=" + flows),
-  /** 改角色 / 启用禁用。禁用或改角色会立刻踢掉该用户的全部会话**。 */
-  updateMember: (uid: string, body: { role?: string; status?: string }) =>
-    request<RpMember & { sessions_revoked?: number; relogin_required?: boolean }>(
-      "members/" + encodeURIComponent(uid), { method: "PATCH", body }),
-  /**
-   * 调余额。必须走增量 delta_credit，没有「设为 N」的语义。
-   *
-   * 服务端只做增量：设值语义在并发下会吞掉别人的充值
-   * （A 读到 100 → 想设 50 → B 充了 20 → A 写入 50，那 20 就没了）。
-   * 界面因此也用「+ / −」的增量输入，不要做一个「余额 = __」的输入框。
-   */
-  adjustMemberBalance: (uid: string, deltaCredit: number, reason: string) =>
-    request<RpBalanceResult>("members/" + encodeURIComponent(uid) + "/balance",
-      { method: "POST", body: { delta_credit: deltaCredit, reason } }),
-  /**
-   * 删用户。余额非 0 时服务端回 409，必须在界面上把这句话显示出来，
-   * 并引导管理员改用「强制删除」。force=true 会记一笔负流水结清余额。
-   */
-  deleteMember: (uid: string, force = false) =>
-    request<RpDeleteMemberResult>(
-      "members/" + encodeURIComponent(uid) + (force ? "?force=true" : ""),
-      { method: "DELETE" }),
-
   // ── 服务设置（两端共用同一套接口与字段名）──────────────────────────────
-  /** 读全部设置。SMTP 密码只回显「是否已配置」，永不回显明文。 */
+  /** 读全部设置。 */
   settings: () => request<RpServiceSettings>("settings"),
-  /**
-   * 改设置。浅合并：只更新请求体里出现过的键。
-   *
-   * 所以「只想改站点名」就只传 site_name，不要把整个 settings 原样发回来 ——
-   * 那会把 SMTP 配置（含加密后的密码）一起覆盖掉，而两端各自拼整份对象时
-   * 拼法一旦不同，就是「网页端改完桌面端没了」。
-   */
+  /** 改设置。浅合并：只更新请求体里出现过的键。 */
   saveSettings: (body: RpSettingsPatch) => request<RpServiceSettings>("settings", { method: "PUT", body }),
-  /** 测试发信。不配真 SMTP 时返回失败原因，不会挂住界面（服务端是同步纯函数判定）。 */
-  testSmtp: (to?: string) =>
-    request<RpSmtpTestResult>("settings/smtp-test", { method: "POST", body: to ? { to } : {} }),
 };
 
 /** 请求日志里 outcome 字段的中文与色调。 */
@@ -764,32 +508,6 @@ export const POOL_STATE_LABELS: Record<string, { label: string; tone: "ok" | "wa
   invalid: { label: "凭据异常", tone: "bad" },
   missing: { label: "缺失", tone: "bad" },
 };
-
-/**
- * 终端用户角色 / 状态的中文口径。两端共用这一份（sync-spec「显示口径」）。
- *
- * 刻意与后台账号的「管理员 / 只读」区分开：那套是 admin/viewer（控制台登录用），
- * 这套是 admin/user（终端用户）。界面混用会让管理员以为在改同一个东西。
- */
-export const MEMBER_ROLE_LABELS: Record<string, string> = {
-  admin: "管理员",
-  user: "普通用户",
-};
-
-export const MEMBER_STATUS_LABELS: Record<string, string> = {
-  active: "正常",
-  disabled: "已禁用",
-};
-
-export function memberRoleLabel(role: string | undefined | null): string {
-  const key = String(role || "");
-  return MEMBER_ROLE_LABELS[key] ?? (key || "—");
-}
-
-export function memberStatusLabel(status: string | undefined | null): string {
-  const key = String(status || "");
-  return MEMBER_STATUS_LABELS[key] ?? (key || "—");
-}
 
 /**
  * 厘 → 积分。只在显示层用，且固定 3 位小数（1 积分 = 1000 厘）。
@@ -826,36 +544,6 @@ export function fmtCreditTime(seconds: number | null | undefined): string {
   return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate())
     + " " + pad(date.getHours()) + ":" + pad(date.getMinutes());
 }
-
-/**
- * 积分流水 kind 的中文。
- *
- * 词表来自后端实际会写出的 kind（`redemption.grant/spend` 的全部调用点）：
- * · `recharge`      —— `server.py` 的后台充值
- * · `admin_adjust`  —— `members.adjust_balance`（本面板的调余额）
- * · `adjust`        —— `accounts.adjust_balance` 的默认值
- * · `member_deleted` / `spend` —— 删号结清与扣费
- *
- * 未知 kind 原样显示而不是留空：服务端将来加新类别时，
- * 留空会让管理员以为这条流水坏了，而原样显示至少还能看出是什么。
- */
-export const FLOW_KIND_LABELS: Record<string, string> = {
-  recharge: "充值",
-  admin_adjust: "管理员调整",
-  adjust: "余额调整",
-  spend: "消费扣费",
-  member_deleted: "删号结清",
-  refund: "退款",
-};
-
-export function flowKindLabel(kind: string | undefined | null): string {
-  const key = String(kind || "");
-  return FLOW_KIND_LABELS[key] ?? (key || "—");
-}
-
-/** SMTP 未配置且开着验证码开关时，用户指定的原文（两端一字不差）。 */
-export const SMTP_MISSING_REGISTER_NOTICE =
-  "未配置 SMTP，当前无法注册 请联系管理员关闭验证码验证 或者给您分发账号登录";
 
 export const ROUTING_LABELS: Record<string, { label: string; desc: string }> = {
   round_robin: {

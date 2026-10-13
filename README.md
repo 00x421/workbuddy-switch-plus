@@ -14,7 +14,6 @@ WorkBuddy、CodeBuddy IDE、CodeBuddy CLI 与 VS Code / JetBrains CodeBuddy 插�
 | 产品名 | workbuddy-switch | **WB-Switch-Plus** |
 | 版本检查 / 更新源 | changexbc/workbuddy-switch | **Hyact/workbuddy-switch-plus** |
 | 反代服务 | 无 | 内置（见下），桌面端托管、可打包为单文件 |
-| 用户体系 🚧 | 无 | 有骨架，**尚未完善，留待下个版本**（见下） |
 | 反代默认模型 | `auto` | **`deepseek-v4.1-flash`** |
 
 数据目录改名是为了避免与上游互相覆盖账号库、会话关联与 hook 配置。
@@ -38,7 +37,6 @@ WorkBuddy、CodeBuddy IDE、CodeBuddy CLI 与 VS Code / JetBrains CodeBuddy 插�
 | 自动轮换 | 后台把积分最紧迫的账号设为 CLI 后续启动账号；检测到 CLI 会话运行则跳过 |
 | 自动更新 | 从 GitHub Releases 检查新版本，整包更新经签名校验 |
 | 反代服务 | 桌面端托管独立反代服务，OpenAI / Anthropic 兼容入口 + 多密钥分发 + 账号池轮换 |
-| 用户体系 🚧 | 邮箱注册 / 登录、余额充值、兑换码、用户中心——**尚未完善，留待下个版本** |
 | 请求日志 | 控制台「请求日志」按分组展示，默认保留 30 天 |
 | 会话悬浮窗 | 桌面端内置 Agent Companion 悬浮栏，集中显示各 Agent 会话状态 |
 | 权限检测 | macOS 授权引导与检测 |
@@ -68,18 +66,6 @@ WorkBuddy、CodeBuddy IDE、CodeBuddy CLI 与 VS Code / JetBrains CodeBuddy 插�
 ![反代服务](docs/images/reverse-proxy.png)
 
 细节见 [reverse-proxy/README.md](./reverse-proxy/README.md) 与 [PORTING.md](./reverse-proxy/PORTING.md)。
-
-### 用户体系（服务平台）
-
-> 🚧 **尚未完善，留待下个版本。**
->
-> 反代服务里已经带了一套用户体系的骨架——邮箱注册 / 登录、余额与充值、兑换码、用户中心。
-> 但**这一版还没做完**：功能不完整、边界没测遍，接口与页面在下一版都可能变。
->
-> **现在不要依赖它。** 默认也是关闭的（总闸 `user_system_enabled` 默认 `false`），
-> 需要的话可以在控制台 →「服务设置」里打开试用，但请当作**预览**，不要拿它对外收钱。
->
-> 下个版本补齐后会在这里写清完整用法。
 
 ### 请求日志
 
@@ -139,7 +125,7 @@ python build-exe.py                  # → dist/wb-reverse-proxy.exe
 | 反代登录凭据（可选「保存密码」） | `~/.wb-switch-plus/reverse-proxy-login.json`（明文，界面会写明） |
 | 上游旧目录 | `~/.wb-switch/`（复制后原样保留，可自行删除） |
 
-反代服务的运行数据（用户、余额、流水、兑换码、请求日志）都在 `reverse-proxy/state.json`
+反代服务的运行数据（管理凭据、API 密钥、令牌、审计与请求日志）都在 `reverse-proxy/state.json`
 与同级的 `data/` 下，**跟 exe 放在一起**，整个文件夹拷走即可搬迁。
 
 可用环境变量 `WB_SWITCH_HOME` 覆盖数据目录。
@@ -153,8 +139,7 @@ python build-exe.py                  # → dist/wb-reverse-proxy.exe
 5. **各端开关**：设置 →「支持工具」
 6. **自动轮换**：设置 → CodeBuddy CLI 自动轮换
 7. **反代服务**：侧栏「反代服务」定位 / 启动服务，进控制台管理密钥、账号池与请求日志
-8. **用户体系** 🚧：尚未完善，留待下个版本（默认关闭，见[上文](#用户体系服务平台)）
-9. **更新**：自动检查本仓库的 GitHub Releases，左下角可直接升级
+8. **更新**：自动检查本仓库的 GitHub Releases，左下角可直接升级
 
 ## 界面预览
 

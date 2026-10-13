@@ -171,7 +171,8 @@ python build-exe.py --onedir           # 目录形态（启动更快）
 | `WB_ALLOW_ADMIN_KEY` | `1` | 是否保留旧的「单密钥登录」通道 |
 | `WB_ADMIN_CORS_ORIGINS` | `*` | 管理 API 允许的跨源来源，逗号分隔 |
 | `WB_TRUST_PROXY` | `0` | 是否信任 `X-Forwarded-For`（前面挂了反代才开） |
-| `WB_TRUSTED_PROXY_CIDRS` | 内网段 | 可信代理来源段 |
+| `WB_TRUSTED_PROXY_CIDRS` | `127.0.0.0/8,::1/128` | 可信代理来源段；挂反代时把反代地址写进来 |
+| `WB_FORWARDED_ALLOW_IPS` | `127.0.0.1` | uvicorn 采信 `X-Forwarded-*` 的来源；反代不在本机时必须显式设置 |
 | `CODEBUDDY2OPENAI_KEY` | 空 | 预置的下游 API Key |
 | `WB_SWITCH_WRITE_BACK` | `0` | 是否把刷新结果回写账号库 |
 

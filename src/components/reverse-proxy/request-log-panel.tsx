@@ -10,6 +10,7 @@ import {
 import {
   OUTCOME_LABELS, rp, type RpGroup, type RpKey, type RpRequestLog,
 } from "@/lib/reverse-proxy";
+import { todayCreditTotal } from "@/lib/request-log-today";
 import { Banner, Empty, PanelHeader, StatCard, ToneBadge, fmtNum, fmtTime } from "./rp-shared";
 
 const OUTCOMES = [
@@ -24,8 +25,9 @@ const OUTCOMES = [
  * 请求日志：每次 /v1 调用用了哪个账号、什么模型、扣了多少。
  *
  * 这是排查「某个号是不是被过度使用」「积分花到哪去了」最直接的一页。
- * 数据是服务端最近 300 条，会落盘（`request-log.jsonl`），重启不清零——
- * 排查问题常常是「重启之后想看看上次崩之前发生了什么」。
+ * 数据是服务端最近 30 天（`REQUEST_LOG_RETENTION_DAYS`），会落盘
+ * （`request-log.jsonl`），重启不清零——排查问题常常是「重启之后想看看
+ * 上次崩之前发生了什么」。超期条目在写入时会被真正删除，不会无限占磁盘。
  *
  * 自动刷新：进页面时拉一次，之后每 5 秒拉一次（切走 / 页面不可见时停），
  * 所以服务端一有新请求，这里几乎立刻能看到，不用手点刷新。
@@ -56,7 +58,9 @@ export function RequestLogPanel({ keys, groups }: { keys?: RpKey[]; groups?: RpG
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     try {
-      setRows(await rp.requestLogs(300));
+      // 取满 30 天。服务端本来就只保留 30 天（REQUEST_LOG_RETENTION_DAYS），
+      // 上限 5000 条是内存缓冲 —— 按 30 天的量要，而不是只拿最近 300 条。
+      setRows(await rp.requestLogs(5000));
       setError("");
       setUpdatedAt(Date.now());
     } catch (cause) {
@@ -119,9 +123,11 @@ export function RequestLogPanel({ keys, groups }: { keys?: RpKey[]; groups?: RpG
       ok,
       failed: filtered.length - ok,
       tokens: filtered.reduce((s, r) => s + (r.tokens || 0), 0),
-      credit: filtered.reduce((s, r) => s + (r.credit || 0), 0),
     };
   }, [filtered]);
+
+  /** 今日（本地零点起）的消耗积分。刻意不跟着筛选变 —— 见该函数的注释。 */
+  const todayCredit = useMemo(() => todayCreditTotal(rows), [rows]);
 
   /** 每个账号在筛选范围内的用量——「哪个号被用得多」一眼可见。 */
   const byAccount = useMemo(() => {
@@ -172,7 +178,7 @@ export function RequestLogPanel({ keys, groups }: { keys?: RpKey[]; groups?: RpG
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatCard label="筛选后请求" value={fmtNum(totals.count, 0)} hint={`成功 ${totals.ok} · 失败 ${totals.failed}`} />
         <StatCard label="消耗 Token" value={fmtNum(totals.tokens, 0)} hint="按上游返回的 usage 累计" />
-        <StatCard label="消耗积分" value={fmtNum(totals.credit)} hint="上游真实扣费口径" accent />
+        <StatCard label="今日消耗积分" value={fmtNum(todayCredit)} hint="今天 00:00 起，不受筛选影响" accent />
         <StatCard label="参与账号" value={fmtNum(byAccount.length, 0)} hint="这段时间里实际被调到的账号数" />
       </div>
 

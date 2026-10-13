@@ -30,6 +30,27 @@ function exportFileName(): string {
   return `wb-switch-accounts-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.json`;
 }
 
+/**
+ * 保存对话框的默认完整路径。
+ *
+ * ⚠️ 这里**必须拼上目录**。原先只传了 `exportFileName()` —— 光一个文件名，
+ * Tauri 的 save() 没有「上次用过的目录」可继承，就退回**进程的当前工作目录**，
+ * 而桌面端是被 Tauri 拉起来的，cwd 落在系统临时目录里。用户看到的现象就是
+ * 「默认下载路径在 temp」。
+ *
+ * 取系统「下载」目录。取不到时退回纯文件名（保持原行为，不让导出整个失败）——
+ * `downloadDir()` 在少数被裁剪的环境里会抛，不能让它拖垮主流程。
+ */
+async function exportDefaultPath(): Promise<string> {
+  const name = exportFileName();
+  try {
+    const { downloadDir, join } = await import("@tauri-apps/api/path");
+    return await join(await downloadDir(), name);
+  } catch {
+    return name;
+  }
+}
+
 /** 前端 Blob 下载（webui 浏览器用）。 */
 function downloadJson(filename: string, data: unknown) {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -106,7 +127,7 @@ export function ExportAccountsDialog({ open, onOpenChange, accounts, onExported 
         const { save } = await import("@tauri-apps/plugin-dialog");
         const path = await save({
           title: "导出账号",
-          defaultPath: exportFileName(),
+          defaultPath: await exportDefaultPath(),
           filters: [{ name: "JSON", extensions: ["json"] }],
         });
         if (!path) return; // 用户取消保存对话框

@@ -115,7 +115,7 @@ export function GroupsPanel() {
                 <th className="px-3 py-2 text-left font-medium">成员</th>
                 <th className="px-3 py-2 text-left font-medium">组内调度</th>
                 <th className="px-3 py-2 text-left font-medium">启用</th>
-                <th className="px-3 py-2 text-right font-medium">操作</th>
+                                <th className="px-3 py-2 text-right font-medium">操作</th>
               </tr>
             </thead>
             <tbody>

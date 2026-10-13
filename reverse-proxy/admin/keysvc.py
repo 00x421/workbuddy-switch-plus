@@ -125,23 +125,39 @@ def public_key(kid: str, item: dict) -> dict:
         "created": item.get("created"),
         "last_used_at": item.get("last_used_at"),
         "ips": list(item.get("ips") or []),
-        "owner": item.get("owner", ""),
     }
 
 
-def _norm_owner(value) -> str:
-    """归属用户名。只做长度与空白归一 —— 不在这里校验「用户是否存在」，
-    因为管理员可能先建密钥、后建用户；真正的校验在充值那一步。"""
-    return str(value or "").strip()[:64]
+def list_keys(store, *, reveal_secret: bool = False) -> list[dict]:
+    """密钥列表。
 
+    ## `reveal_secret` 为什么必须显式传
 
-def list_keys(store) -> list[dict]:
+    原先这里**无条件**返回 `public_key()`，而它带 `secret` = 明文密钥。
+    调用方 `/admin/api/overview` 只要求 `viewer`（比 admin 弱），
+    于是任何持 readonly 身份的人——包括一枚最低权限的 `wbt_` 令牌——
+    都能拿到全站所有密钥的明文，拿去就能直接调用上游，
+    等于一次性拿走所有人的额度。已用真实 readonly 令牌 PoC 坐实。
+
+    所以默认值改成 `False`（不回显），要让调用方**明确说**"这里可以给明文"。
+    默认安全、显式放开：将来新增调用点时忘传参数，后果是"看不到密钥"
+    （用户会立刻反馈），而不是"悄悄泄露全站密钥"（没人会发现）。
+
+    ⚠️ `secret` 字段本身**始终保留**（admin 拿到的仍是完整视图），
+       不改成删除键是为了不破坏前端 —— 它读 `k.secret` 渲染"复制"按钮，
+       键没了会变成 `undefined` 而不是空串。只读身份拿到的是空串。
+    """
     with store.lock:
         rows = list(store.data["keys"].items())
         ips = store.data.get("api_key_ips", {})
         out = []
         for kid, item in rows:
             view = public_key(kid, item)
+            if not reveal_secret:
+                # 只抹掉明文本身。`hint` / `prefix` 保留 ——
+                # 它们本来就是设计给人看的（sk-wb-abc…），不含足够猜出全文的信息，
+                # 而列表页要靠它们区分"是哪一枚"。
+                view["secret"] = ""
             view["ips"] = list(ips.get(kid, []))
             out.append(view)
     out.sort(key=lambda k: k.get("created") or 0, reverse=True)
@@ -151,7 +167,7 @@ def list_keys(store) -> list[dict]:
 def create_key(store, name, *, value=None, expires_at=None, max_ips=0,
                ip_allowlist=None, models=None, realm="", quota=0,
                quota_credit=0, enabled=True, created_by="", groups=None,
-               owner: str = "") -> tuple[str, str]:
+               ) -> tuple[str, str]:
     import secrets
     token = value or "sk-wb-" + secrets.token_urlsafe(32)
     kid = secrets.token_hex(8)
@@ -176,10 +192,6 @@ def create_key(store, name, *, value=None, expires_at=None, max_ips=0,
         "created": int(time.time()),
         "last_used_at": None,
         "created_by": str(created_by or "")[:64],
-        # 归属用户：门户的「我的余额」就查这个 owner 的账。
-        # 空串 = 没有归属，此时密钥仍能正常用，但不能兑换充值 ——
-        # 理由见 portal.redeem()：钱得有个主人，不能兑进没人认领的池子。
-        "owner": _norm_owner(owner),
     }
     with store.lock:
         if len(store.data["keys"]) >= 100:
@@ -217,13 +229,15 @@ def update_key(store, kid: str, patch: dict) -> dict:
             item["quota"] = int(patch["quota"] or 0)
         if "quota_credit" in patch:
             item["quota_credit"] = norm_credit(patch["quota_credit"])
-        if "owner" in patch:
-            item["owner"] = _norm_owner(patch["owner"])
         store.save()
         return public_key(kid, item)
 
 
 def delete_key(store, kid: str) -> dict:
+    """删除一枚密钥。
+
+    ⚠️ 不允许删掉实例里的最后一枚密钥：那会让管理员把自己锁在门外。
+    """
     with store.lock:
         if kid not in store.data["keys"]:
             raise HTTPException(404, "密钥不存在")

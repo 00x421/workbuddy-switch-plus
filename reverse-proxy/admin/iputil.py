@@ -1,6 +1,6 @@
 """IP 解析与 CIDR 匹配工具（移植自 workbuddy-manager/server/iputil.py）。
 
-配置来源改为环境变量，默认值与 manager 一致。
+配置来源改为环境变量。
 """
 from __future__ import annotations
 
@@ -9,11 +9,18 @@ import os
 
 from fastapi import Request
 
-DEFAULT_TRUSTED_CIDRS = "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7"
+# 只在前面确实挂了反代时才该被信任。不含大面积私网 —— 原先的 10/8、
+# 172.16/12、192.168/16、fc00::/7 会让同内网任意主机的转发头被采信。
+DEFAULT_TRUSTED_CIDRS = "127.0.0.0/8,::1/128"
 
 
 def trust_proxy() -> bool:
-    return os.environ.get("WB_TRUST_PROXY", "1") == "1"
+    """是否采信转发头。默认不信任，与 PORTING.md 的配置表一致。
+
+    本机直连时 peer 就是 127.0.0.1，而回环必须留在可信网段里
+    （否则本机反代部署会失效），所以收窄 CIDR 挡不住伪造转发头。
+    """
+    return os.environ.get("WB_TRUST_PROXY", "0") == "1"
 
 
 def trusted_proxy_cidrs() -> list[str]:
@@ -29,18 +36,26 @@ def trusted_proxy_hops() -> int:
 
 
 def _clean_ip(value: str) -> str:
-    """去掉端口与方括号，兼容 IPv6 形如 [::1]:1234。"""
+    """去掉端口与方括号，兼容 IPv6 形如 [::1]:1234。
+
+    非法值返回空串，不原样返回 —— 否则 `X-Real-IP` 里的任意文本
+    会被当成客户端 IP 存进访问日志。
+    """
     raw = (value or "").strip()
     if not raw:
         return ""
     if raw.startswith("["):  # [::1]:1234
         end = raw.find("]")
-        return raw[1:end] if end > 0 else raw
-    # 纯 IPv6 不处理；IPv4:port 去掉端口
-    if raw.count(":") == 1:
+        raw = raw[1:end] if end > 0 else raw
+    elif raw.count(":") == 1:
+        # IPv4:port 去掉端口
         host, _, port = raw.partition(":")
         if port.isdigit():
-            return host
+            raw = host
+    try:
+        ipaddress.ip_address(raw)
+    except ValueError:
+        return ""
     return raw
 
 

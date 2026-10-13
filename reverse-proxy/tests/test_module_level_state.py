@@ -47,8 +47,7 @@ class ModuleLevelStateGuardTest(unittest.TestCase):
         ("admin.pool", "ACTION_KINDS"),
     }
 
-    MODULES = ("admin.server", "admin.pool", "admin.accounts",
-               "admin.settings_store", "admin.mailer")
+    MODULES = ("admin.server", "admin.pool", "admin.settings_store")
 
     def test_no_module_level_mutable_state(self):
         import importlib

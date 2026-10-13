@@ -1,11 +1,25 @@
+# 二改：本工作流已改为**仅手动触发**（Actions 页面 → Run workflow）。
+#
+# 原自动触发条件已停用，原因：本项目不使用 GitHub Actions 构建产物，
+# 由作者本地构建后手工上传到 Release。停用自动触发后：
+#   · push 代码 与 打版本标签 都不会再跑本工作流；
+#   · 手动运行时的输入参数、构建步骤与产物上传逻辑**全部保留不变**。
+#
+# 如需恢复自动触发，把下面 `on:` 段替换回备份即可：
+#   _hyact_work/_backup_before_ci_narrowing/build.yml
+#   _hyact_work/_backup_before_ci_narrowing/test.yml
+
 name: test
 
 # 测试必须独立于发布流程：build.yml 仅由 tag push / workflow_dispatch 触发，
 # 测试若挂在它下面，就只在发版时执行——2026-09 的 Windows「os error 5」回归
-# 正是这样漏到 0.1.43 的。本 workflow 在 push 与 PR 上即触发。
+# 正是这样漏到 0.1.43 的。
+# 二改注：本 workflow 原在 push 与 PR 上触发，现已改为仅手动（见下方 `on:` 段）。
 on:
-  push:
-  pull_request:
+  # 二改：原为裸 `push` 与 `pull_request`，已停用（不使用 CI）。
+  # 恢复时取消注释并把 `workflow_dispatch:` 保留即可。
+  # push:
+  # pull_request:
   workflow_dispatch:
 
 permissions:

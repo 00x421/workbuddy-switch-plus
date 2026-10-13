@@ -1,5 +1,6 @@
 """Small, persistent management layer for workbuddy2api. Single-process deployment."""
 import asyncio
+import ipaddress
 import json
 import os
 import secrets
@@ -9,6 +10,7 @@ import time
 from collections import deque
 from pathlib import Path
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 
 import httpx
 import uvicorn
@@ -17,16 +19,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from core import converter
-from . import accounts
+from . import assets
 from . import egress
 from . import groups
 from . import keysvc
-from . import mailer
 from . import settings_store
 from . import keyexport
-from . import members as members_svc
-from . import portal
-from . import redemption
 from . import usage
 from .browser_login import BrowserLogin
 from .pool import TASK_KINDS, AccountPool, PoolMiddleware, default_pool
@@ -35,21 +33,22 @@ from .security import COOKIE, Security, bearer_session, digest, scope_to_role
 from .iputil import client_ip, client_ip_from_scope, evaluate, valid_cidr
 
 MAX_BODY = 1024 * 1024
-def _assets_dir() -> Path:
-    """内置静态后台的目录；打包成 exe 后在 PyInstaller 的解包目录里。"""
-    candidates = []
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        candidates.append(Path(meipass) / "admin" / "static")
-    candidates.append(Path(__file__).parent / "static")
-    for candidate in candidates:
-        if candidate.is_dir():
-            return candidate
-    return candidates[-1]
 
-
-ASSETS = _assets_dir()
+# 静态资源目录。**经 `assets.get()` 解析**，不再是裸的 `_MEIPASS`。
+#
+# 原先这里是 `Path(_MEIPASS) / "admin" / "static"` —— 在服务器上会炸：
+# 单文件 exe 把资源解包到 `%TEMP%\__MEIxxxxx`，而磁盘清理会删掉它，
+# 一删所有页面立刻 404（API 却还通，日志也不报错，只有网页全挂）。
+# 现在改为首次启动固化到 exe 同级，详见 `admin/assets.py` 的长注释。
+ASSETS = assets.get()
 IP_LOG_LIMIT = 500
+
+# 自助密钥的数量上限（历史遗留常量）。
+#
+# 为什么不直接用 keysvc 的全局上限（100）：那是**全实例**的总量，
+# 一个人建满 100 枚就能把所有人的额度吃光，其他人一枚都建不了。
+# 每人限一个小额度，全局上限仍然是最后一道兜底。
+ME_KEY_LIMIT = 20
 
 
 def write_json(path, value):
@@ -306,31 +305,35 @@ class IPGuardMiddleware:
         await self.app(scope, receive, send)
 
 
-def _dev_caller(req) -> bool:
-    """调用方是不是「本机」。**只用于决定要不要把 dev 验证码回给响应**。
+def block_metadata_target(url: str) -> None:
+    """拒绝把上游地址指到云元数据服务。
 
-    判据是 **TCP 对端**（peer），不是 `client_ip(req)`：
-    `client_ip` 会在对端落在可信代理网段时采信 `X-Forwarded-For`，
-    而那正是攻击者能伪造的字段 —— 用它来判「是不是本机」等于
-    「带一个 XFF: 127.0.0.1 就能拿到别人的验证码」。
-    TCP 对端没法伪造，才是可用的判据。
-
-    IPv6 回环 (`::1`) 与本机 IPv4 回环都算；`testclient` 的对端是
-    `testclient`（不是 IP），那也算本机 —— 它是进程内 ASGI transport，
-    请求根本没有经过网络（FastAPI 的 TestClient 就是这么发的）。
-
-    放在模块级是为了**能被直接测**：这个判定是「dev 出口会不会把验证码
-    泄露给远程调用方」的唯一闸门，藏在 `create_app()` 的闭包里就只能
-    端到端测，而端到端测模拟不了「来自公网的对端」。
+    上游允许指任意主机是功能（用户自己的上游常在内网），但元数据地址
+    （169.254.169.254 等）不是任何人的上游，指向它纯粹是攻击特征。
+    触发这个出网请求的端点只要 viewer，挡掉它能把只读令牌的
+    探测上限压到「只能探内网端口」。
     """
-    peer = (getattr(req, "client", None).host if getattr(req, "client", None) else "") or ""
-    if peer == "testclient":
-        return True
+    host = urlparse(url).hostname or ""
+    if not host:
+        raise HTTPException(400, "上游地址缺少主机名")
+    lowered = host.strip("[]").lower()
+
+    if lowered in _METADATA_HOSTS:
+        raise HTTPException(400, "不支持指向云元数据服务的上游地址")
     try:
-        import ipaddress
-        return ipaddress.ip_address(peer).is_loopback
+        ip = ipaddress.ip_address(lowered)
     except ValueError:
-        return False
+        return
+    # 169.254.0.0/16 整段是链路本地，元数据服务在里面。
+    if ip.is_link_local:
+        raise HTTPException(400, "不支持指向链路本地地址的上游")
+
+
+#: 云元数据服务的常见名字与地址。写死是刻意的 —— 这张表不该被配置放宽。
+_METADATA_HOSTS = frozenset({
+    "metadata.google.internal", "metadata.goog",
+    "169.254.169.254", "169.254.170.2", "fd00:ec2::254",
+})
 
 
 def _evict_stale_attempts(state: dict, now: int) -> int:
@@ -528,85 +531,6 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
     async def favicon():
         return FileResponse(ASSETS / "favicon.svg", media_type="image/svg+xml")
 
-    # 用户中心页面。
-    #
-    # 与 /login、/register 同形：服务端不做跳转判断。
-    # 「未登录该不该看到用户中心」由页面 JS 读 /login/api/me 后自己决定；
-    # 服务端插手会制造两套互相打架的跳转规则。
-    #
-    # 本页 HTML 是纯骨架（匿名 / 用户1 / 用户2 三态逐字节相同），
-    # 不内联任何身份数据，数据一律由 me.js 运行时取。
-    @app.get("/me")
-    async def me_page():
-        return _login_asset("me.html")
-
-    @app.get("/me/")
-    async def me_page_slash():
-        return _login_asset("me.html")
-
-    @app.get("/me/assets/{filename}")
-    async def me_asset(filename: str):
-        # 白名单显式枚举，与 /login/assets、/register/assets 同口径：
-        # 直接用用户传来的名字拼路径就是目录穿越（../../etc/passwd）。
-        if filename not in {"me.js", "me.css"}:
-            raise HTTPException(404)
-        return _login_asset(filename)
-
-    # 用户登录页。
-    #
-    # `/login` 是终端用户的登录页，和 `/admin/`（控制台）不是一回事。
-    #
-    # ⚠️ 刻意不做「已登录就 302 跳走」：那是前端的判断（它知道要跳哪、
-    # 带了什么 query），服务端插一脚只会制造两套互相打架的跳转规则。
-    @app.get("/login")
-    async def login_page():
-        return _login_asset("login.html")
-
-    @app.get("/login/")
-    async def login_page_slash():
-        return _login_asset("login.html")
-
-    @app.get("/login/assets/{filename}")
-    async def login_asset(filename: str):
-        # 白名单：直接用用户传来的名字拼路径就是目录穿越。
-        if filename not in {"login.js", "login.css"}:
-            raise HTTPException(404)
-        return _login_asset(filename)
-
-    def _login_asset(filename: str):
-        path = ASSETS / filename
-        if not path.is_file():
-            raise HTTPException(404, "登录页资源尚未生成")
-        return FileResponse(path)
-
-    # 注册页。
-    #
-    # 与 /login 同形，服务端不做任何跳转判断。
-    # 「已登录该不该看到注册页」「本站允不允许注册」全部由前端 JS 决定。
-    #
-    # `/register` 在任何情况下都不做 302，包括已登录、站点关闭注册、
-    # 邮箱域名不被允许 —— 这些都由前端读接口后自己决定渲染什么。
-    @app.get("/register")
-    async def register_page():
-        return _login_asset("register.html")
-
-    @app.get("/register/")
-    async def register_page_slash():
-        return _login_asset("register.html")
-
-    @app.get("/register/assets/{filename}")
-    async def register_asset(filename: str):
-        # 白名单显式枚举，与 /login/assets、/portal/assets 同口径：
-        # 直接用用户传来的名字拼路径就是目录穿越（`../../etc/passwd`）。
-        #
-        # 为什么只有 register.js、没有 register.css：register.html 刻意复用
-        # `/login/assets/login.css`（见该文件里的注释）—— 两个页面是同一套视觉，
-        # 复制成两份转手就会漂移。所以不要在这里放开 login.css，
-        # 那会同时给出第二个 css 真相源。
-        if filename not in {"register.js"}:
-            raise HTTPException(404)
-        return _login_asset(filename)
-
     # ── Cookie 的 Secure 标志：跟着请求实际是不是 HTTPS 走 ──────
     #
     # 原先是硬编码 True。后果不是「更安全」，而是登录直接失效：
@@ -620,7 +544,9 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
     # 仍然保留 Secure：只要经过 HTTPS 反代（VPS 上挂 Caddy / Nginx），
     # 或者显式配 `WB_SECURE_COOKIE=1`，cookie 就带 Secure，
     # 不会为了本机调试方便而把线上部署的安全性降下来。
+
     def _cookie_secure(req: Request) -> bool:
+        """管理会话 cookie 要不要带 Secure。"""
         override = os.environ.get("WB_SECURE_COOKIE", "").strip().lower()
         if override in ("1", "true", "yes", "on"):
             return True
@@ -633,6 +559,17 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
         return req.url.scheme == "https"
 
     def _login_response(csrf: str, sid: str, req: Request) -> JSONResponse:
+        """登录成功：下发会话 cookie + 响应体里的 csrf / token。
+
+        `token` 是 `X-Admin-Token` 的值，供**跨源调用方**用（桌面端 SPA 走
+        `credentials:"omit"`，SameSite=strict 的 cookie 根本带不上）。
+
+        它和 cookie 是同一份凭据，所以这里并不额外扩大暴露面 ——
+        能读到这个响应的脚本本来就已经在同源上下文里了。但要注意
+        `X-Admin-Token` 那条路**跳过 CSRF**（见 security.bearer_session），
+        因此它的寿命与注销行为必须可靠：`/admin/api/logout` 会立刻失效
+        （有测试锁着），未注销时最长 12 小时。
+        """
         response = JSONResponse({"csrf": csrf, "token": sid})
         response.set_cookie(COOKIE, sid, secure=_cookie_secure(req), httponly=True,
                             samesite="strict", path="/admin", max_age=12 * 3600)
@@ -764,7 +701,9 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
     # ── 管理用户（仅会话管理员）────────────────────────────────
     @app.get("/admin/api/users")
     async def list_users(req: Request):
-        viewer(req)
+        # admin 而不是 viewer：这份清单是控制台账号 + 角色，
+        # 正是登录爆破需要的输入。同段的写接口本来都是 session_admin。
+        admin(req)
         return security.public_users()
 
     @app.post("/admin/api/users")
@@ -904,7 +843,8 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
 
     @app.get("/admin/api/audit-logs")
     async def audit_logs(req: Request, limit: int = 200):
-        viewer(req)
+        # admin：审计日志含全部运维动作与 PII，只读身份不该看到。
+        admin(req)
         return security.audit_logs(limit)
 
     @app.post("/admin/api/audit-logs/clear")
@@ -941,33 +881,63 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
         owner, _ = bearer_session(req)
         return await browser_login.cancel(fid, digest(owner))
 
-    def _pool_view(store) -> dict:
+    #: 只读身份可以看到的 pool 字段。**白名单**，不是黑名单。
+    #: pool 段里存着 wb2api_key（发给上游的 Bearer 凭据），
+    #: 而端点只要 viewer —— 用白名单是因为这个 store 段谁都能往里加键，
+    #: 以后加了新凭据字段，黑名单会默默漏出去。
+    POOL_PUBLIC_KEYS = (
+        "routing", "spread", "spread_minutes",
+        "auto_checkin", "checkin_time",
+        "auto_travel", "travel_time",
+        "auto_keepalive", "keepalive_hours",
+        "auto_active", "active_time", "active_reports",
+        # 地址不是凭据，界面要显示"连的是哪个上游"；key 绝不回显。
+        "wb2api_base",
+    )
+
+    def _pool_view(store, *, reveal_secret: bool = False) -> dict:
         """`pool` 段 + 一条**上游读取状态**。
 
         `wb2api_error` 非空 = 这次（或最近一次）读上游 `/status` 失败了，
         界面据此把「冷却状态未知」讲出来，而不是画成「没有冷却」。
 
         放在 pool 段而不是每行账号里：这个错误是**整批共享**的 ——
-        `upstream_cooldowns()` 一次调用拿整张 uid→冷却 的表
-        （见 pool.py 里那句「只读一次，给整批账号用」）。
+        `upstream_cooldowns()` 一次调用拿整张 uid→冷却 的表。
         逐行重复同一个错误字符串既冗余，又会让「是不是每个号各有各的错」
         这种误读变得可能。
 
         注意：**这里不碰 `up_cooling`**。那仍然是 None（未知），
         绝不因为读不到就退化成 False（无冷却）—— 那正是这个缺陷的成因。
         """
-        view = dict(store.data["pool"])
+        raw = store.data["pool"]
+        if reveal_secret:
+            view = dict(raw)
+        else:
+            view = {k: raw[k] for k in POOL_PUBLIC_KEYS if k in raw}
         view["wb2api_error"] = pool.upstream_error()
         return view
 
 
     @app.get("/admin/api/overview")
     async def overview(req: Request):
-        viewer(req)
+        actor = viewer(req)
+        # ⚠️ 密钥的**明文**只给管理员。
+        #
+        # 这个端点原先无条件内联 `keysvc.list_keys(store)`，而它带回明文
+        # `secret`；端点本身只要 viewer，于是持 readonly 身份的人
+        # （含一枚最低权限 wbt_ 令牌）能读到全站所有密钥明文 ——
+        # 拿到即可直接调用上游，等于一次性拿走所有人的额度。
+        # 已用真实 readonly 令牌 PoC 坐实。
+        #
+        # 按角色决定，而不是把这个端点整体提权到 admin：
+        # viewer 本来就该能看用量/账号概览（面板的只读页要靠它），
+        # 提权会把只读面板整个打挂；真正敏感的只有密钥明文那一项。
+        reveal = str((actor or {}).get("role") or "") == "admin"
         with store.lock:
             return {"accounts": pool.rows(store.account_rows()),
-                    "pool": _pool_view(store),
-                    "metrics": metrics.snapshot(), "keys": keysvc.list_keys(store),
+                    "pool": _pool_view(store, reveal_secret=reveal),
+                    "metrics": metrics.snapshot(),
+                    "keys": keysvc.list_keys(store, reveal_secret=reveal),
                     "models": converter.get_available_models(),
                     # 客户端没带 model 时反代替它选的那一个（已按本机可用清单解析过）。
                     # 界面拿它当测试表单的默认选中项，也是「默认模型」这件事的唯一出处。
@@ -1083,6 +1053,8 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
                 base = base.strip().rstrip("/")
                 if base and not re.fullmatch(r"https?://[^\s/]+(?::\d+)?(?:/[^\s]*)?", base):
                     raise HTTPException(400, "上游地址需形如 http://127.0.0.1:7863")
+                if base:
+                    block_metadata_target(base)
                 settings["wb2api_base"] = base
             if "wb2api_key" in body:
                 key = body["wb2api_key"]
@@ -1353,6 +1325,11 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
         `name`。
         """
         actor = viewer(req)
+        # ⚠️ 同一类泄露的第二处：导出功能产出的是**可直接用的配置**，
+        # 里面必然含明文密钥。原先只要 viewer，等于只读身份也能把全站
+        # 密钥导出来。导出本来就是"把密钥交出去"这个动作，归管理员。
+        if str((actor or {}).get("role") or "") != "admin":
+            raise HTTPException(403, "只有管理员可以导出密钥配置")
         client = (req.query_params.get("client") or "ccswitch").strip().lower()
         if client not in keyexport.CLIENTS:
             raise HTTPException(400, f"client 必须是 {keyexport.CLIENTS} 之一")
@@ -1651,9 +1628,12 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
     @app.get("/admin/api/pool/summary")
     async def pool_summary(req: Request):
         """账号池概览：可直接喂给 SPA 的账号页。"""
-        viewer(req)
+        actor = viewer(req)
+        # 与 overview 同口径：pool 段里有上游 Bearer 凭据，只给管理员。
+        reveal = str((actor or {}).get("role") or "") == "admin"
         live_accounts(store)
-        return {"accounts": pool.rows(store.account_rows()), "pool": _pool_view(store)}
+        return {"accounts": pool.rows(store.account_rows()),
+                "pool": _pool_view(store, reveal_secret=reveal)}
 
     # ── API 密钥（多密钥分发 + IP/模型白名单 + 额度）──────────────
     @app.post("/admin/api/keys")
@@ -1680,12 +1660,6 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
             # 但这里是逐字段拆开传的——漏掉这一行会让「创建时勾了分组、保存后没生效」，
             # 而且只在重新打开列表时才发现。
             groups=body.get("groups") or [],
-            # 归属用户：门户按它查余额与流水。同样是逐字段拆开传的，
-            # 漏掉会让「创建时选了归属、保存后是空」—— 表现是门户里余额永远 0。
-            # `owner` 一律存用户 uid（不是 email）：`keysvc._norm_owner` 只 strip 不 lower，
-            # 存 email 会让 Alice@x.com / alice@x.com 变成两份余额。
-            # 且必须校验该 uid 存在，否则钱会记进没人认领的桶 —— 见 members.assert_owner。
-            owner=members_svc.assert_owner(store, body.get("owner")),
             created_by=actor["username"],
         )
         security.audit(actor, "create_key", name, f"id={kid}；来源 {client_ip(req)}")
@@ -1699,10 +1673,6 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
             for cidr in keysvc.norm_cidrs(body.get("ip_allowlist")):
                 if not valid_cidr(cidr):
                     raise HTTPException(400, f"IP 白名单里有无法识别的条目：{cidr}。请写成单个 IP 或 CIDR（10.0.0.0/8）。")
-        if "owner" in body:
-            # 与创建路径同样的校验：owner 必须是真实存在的用户 uid。
-            # 空字符串是允许的（= 解绑，无主 key 是既有语义）。
-            body = dict(body, owner=members_svc.assert_owner(store, body.get("owner")))
         updated = keysvc.update_key(store, kid, body)
         security.audit(actor, "update_key", updated["name"], f"字段={'、'.join(sorted(body))}；来源 {client_ip(req)}")
         return updated
@@ -1771,538 +1741,13 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
                     store.test_keys.discard(digest(temp_key))
             store.events.appendleft({"time": int(time.time()), "model": model, "ok": output["ok"], "seconds": output["seconds"]})
             return output
-
-    # 用户中心接口（页面路径 /me，接口前缀 /me/api/*）。
-    #
-    # 数据层在 portal.py，这里只做 HTTP 层。
-    #
-    # 四条必须保留的保护：
-    #   ① require_user_system()  总闸：只在会话分支挡，Bearer 分支不挡；
-    #   ② 凭据冲突 403           自己的会话 + 别人的 key = 越权；
-    #   ③ 兑换成功不清零          否则 19 假 + 1 真 交错可绕过限流；
-    #   ④ 清理只删过期窗口         否则刷 500 个密钥即可重置自己的限流计数。
-
-    def me_key(req: Request) -> dict:
-        """解析 Bearer / X-API-Key。无效、停用、过期一律 401。
-
-        配额用尽不拦：额度用完的用户恰恰最需要进来查用量、去充值。
-        """
-        header = req.headers.get("authorization") or ""
-        token = header[7:].strip() if header.lower().startswith("bearer ") else ""
-        if not token:
-            token = (req.headers.get("x-api-key") or "").strip()
-        if not token:
-            raise HTTPException(401, "缺少 API Key。请用 Authorization: Bearer <你的密钥> 访问。")
-        found = keysvc.resolve_key(store, token)
-        if not found:
-            raise HTTPException(401, "API Key 无效")
-        if not found.get("enabled", True):
-            raise HTTPException(401, "这枚 API Key 已被停用")
-        exp = found.get("expires_at")
-        if exp and int(exp) < time.time():
-            raise HTTPException(401, "这枚 API Key 已过期")
-        return found
-
-    # ── 用户中心身份：两种等价身份 ─────────────────────────────────
-    #
-    #   · 老客户端：Authorization: Bearer sk-wb-...（没有 cookie）；
-    #   · 新用户：浏览器里的 workbuddy_user 会话 cookie（没有 key）。
-    #
-    # ⚠️ 同时送 key 和 cookie 时的优先级是安全关键，不是风格问题：
-    #     同一个人 -> 放行（两种凭据指向同一个 uid，没有歧义）；
-    #     不同的人 -> 403 凭据冲突。
-    # 为什么不能「以 key 为准」或「以 cookie 为准」：那等于给攻击者一个
-    # 「用自己那条低权限凭据，套上别人那条高权限凭据」的越权入口 ——
-    # 拿自己的会话配上偷来的 key，就能以 key 主人的身份读余额和流水。
-    def me_identity(req: Request) -> dict:
-        """解析用户中心身份。返回 {"kind", "key", "uid", "member"}。
-
-        kind: "key"（只有 key）/ "session"（只有会话）/ "both"（两者且同主）。
-        """
-        header = req.headers.get("authorization") or ""
-        token = header[7:].strip() if header.lower().startswith("bearer ") else ""
-        if not token:
-            token = (req.headers.get("x-api-key") or "").strip()
-
-        uid = accounts.session_member_id(store, req)
-        member = None
-        if uid:
-            row = accounts.find(store, uid)
-            if row and str(row.get("status") or "active") != "disabled":
-                member = accounts.public_user(store, row)
-            else:
-                # 会话指向已删/已禁用的成员：当作没登录，并且顺手清掉，
-                # 否则它会一直挂到 TTL 到期。
-                accounts.revoke_session(store, req)
-                uid = ""
-
-        if token:
-            key = me_key(req)
-            key_uid = portal.owner_of(key)
-            if uid and key_uid and key_uid != uid:
-                # 跨用户越权。
-                security.audit({"username": "member:" + uid, "role": "member"},
-                               "me_identity_conflict", uid,
-                               "会话 uid=" + uid + " 密钥归属=" + key_uid
-                               + "；来源 " + client_ip(req))
-                raise HTTPException(403, "凭据冲突：当前登录账号与这枚 API Key"
-                                         "不属于同一个用户，请退出后重新登录。")
-            # 密钥无归属时不因 cookie 而自动认领 ——
-            # 那会让「谁的 session 先撞上这枚 key」决定钱记到谁头上。
-            return {"kind": "both" if uid else "key", "key": key,
-                    "uid": key_uid or uid, "member": member, "key_uid": key_uid}
-
-        if uid:
-            # 总闸：关掉用户体系后，会话身份这条路不再放行。
-            #
-            # ⚠️ 只挡这里 —— 上面的 if token: 分支（Bearer 密钥）不挡。
-            # 密钥直连是核心服务，不能因为管理员关了「用户体系」就中断；
-            # 否则这个开关一拨，所有人的服务同时中断，它就从「功能开关」
-            # 变成了「停机按钮」。
-            require_user_system()
-            return {"kind": "session", "key": None, "uid": uid, "member": member,
-                    "key_uid": ""}
-        raise HTTPException(401, "缺少 API Key。请用 Authorization: Bearer <你的密钥> 访问，或先登录账号。")
-
-    def me_uid(ident: dict) -> str:
-        """身份对应的**计费主体** uid。空串 = 无归属（余额按 0 算）。"""
-        return str(ident.get("uid") or "")
-
-    def me_keys_of(ident: dict) -> list:
-        """这个身份名下的全部密钥（会话模式下的「我的密钥」列表）。"""
-        uid = me_uid(ident)
-        if not uid:
-            return []
-        with store.lock:
-            rows = list((store.data.get("keys") or {}).values())
-        mine = [r for r in rows if portal.owner_of(r) == uid]
-        mine.sort(key=lambda r: float(r.get("created") or 0), reverse=True)
-        return [portal.view_key(r) for r in mine]
-
-    def me_rd_from_milli(milli: int) -> float:
-        from . import redemption as _rd
-        return _rd.from_milli(int(milli or 0))
-
-    def me_overview_payload(ident: dict, *, days: int = 30) -> dict:
-        """用户中心首页（会话模式）。形状与 key 模式**刻意保持同构**。
-
-        balance / keys / daily / hourly / totals 都在，只是 key 为 null、
-        mode 为 "session"。前端因此可以只写一套渲染，不必按模式分叉 ——
-        分叉出来的两套渲染早晚会漂移成两个不同的页面。
-        """
-        uid = me_uid(ident)
-        keys = me_keys_of(ident)
-        with store.lock:
-            snapshot = usage.snapshot(store, days=days, hours=24)
-
-        # 会话模式下「我的用量」= 名下所有密钥的合计，而不是某一枚。
-        kids = {k["id"] for k in keys}
-
-        def merge(rows: list) -> list:
-            out = []
-            for row in rows:
-                by_key = row.get("by_key") or {}
-                hit = [by_key[k] for k in kids if k in by_key]
-                if not hit:
-                    continue
-                agg = {k: v for k, v in row.items() if k != "by_key"}
-                for field in ("calls", "tokens"):
-                    agg[field] = sum(int(h.get(field, 0) or 0) for h in hit)
-                agg["credit"] = round(
-                    sum(float(h.get("credit", 0) or 0) for h in hit), 6)
-                out.append(agg)
-            return out
-
-        daily = merge(snapshot.get("daily") or [])
-        hourly = merge(snapshot.get("hourly") or [])
-        balance_milli = accounts.balance_milli(store, uid) if uid else 0
-        return {
-            "mode": "session",
-            "user": ident.get("member"),
-            "key": None,
-            "owner": uid,
-            "keys": keys,
-            "balance": me_rd_from_milli(balance_milli),
-            "balance_milli": balance_milli,
-            "balance_credit": me_rd_from_milli(balance_milli),
-            "has_owner": bool(uid),
-            "daily": daily,
-            "hourly": hourly,
-            "totals": {
-                "calls": sum(int(r.get("calls", 0)) for r in daily),
-                "tokens": sum(int(r.get("tokens", 0)) for r in daily),
-                "credit": round(sum(float(r.get("credit", 0) or 0)
-                                    for r in daily), 6),
-            },
-        }
-
-    @app.get("/me/api/overview")
-    async def me_overview(req: Request):
-        ident = me_identity(req)
-        try:
-            days = max(1, min(365, int(req.query_params.get("days") or 30)))
-        except (TypeError, ValueError):
-            days = 30
-        if ident["kind"] == "key":
-            return portal.overview(store, ident["key"], days=days)
-        return me_overview_payload(ident, days=days)
-
-    @app.get("/me/api/flows")
-    async def me_flows(req: Request):
-        ident = me_identity(req)
-        try:
-            limit = max(1, min(200, int(req.query_params.get("limit") or 100)))
-        except (TypeError, ValueError):
-            limit = 100
-        uid = me_uid(ident)
-        if not uid:
-            return {"flows": []}
-        return {"flows": portal.flows_by_uid(store, uid, limit=limit)}
-
-    @app.post("/me/api/redeem")
-    async def me_redeem(req: Request):
-        ident = me_identity(req)
-        # 兑换要记名，所以必须落到某一个身份上：
-        #   · 有 key -> 沿用密钥的 id 做限流桶（老行为不变）；
-        #   · 只有会话 -> 用 uid 做桶，否则「换个 key 就能重置计数」。
-        uid = me_uid(ident)
-        if not uid:
-            raise HTTPException(
-                400,
-                "当前身份还没有绑定归属用户，无法兑换。"
-                "请先登录账号，或在管理端为密钥设置归属。")
-        bucket = str((ident.get("key") or {}).get("id") or ("uid:" + uid))
-        body = await payload(req)
-        code = str(body.get("code") or "").strip()
-        # 限流：兑换码熵足够高，但无限次尝试本身该挡。
-        #
-        # 计数只在 5 分钟窗口到期时归零，兑换成功也不提前清零。
-        # 若成功后清零，攻击者按「19 次乱猜 + 1 次已知有效码」交错发请求，
-        # 每命中一次就把计数清零，于是永远不会触发 429。
-        # 限流限制的是尝试次数，与猜得对不对无关；正常用户兑错几次后兑对，
-        # 窗口一过自然恢复。
-        # 回归测试：tests/test_me_ratelimit.py::test_success_does_not_reset_the_counter
-        now = int(time.time())
-        with store.lock:
-            state = store.data.setdefault("me_redeem_attempts", {})
-            row = state.get(bucket) or {"count": 0, "window": now}
-            if now - int(row.get("window", 0)) > 300:
-                row = {"count": 0, "window": now}
-            if int(row.get("count", 0)) >= 20:
-                raise HTTPException(429, "兑换尝试过于频繁，请 5 分钟后再试")
-            row["count"] = int(row.get("count", 0)) + 1
-            state[bucket] = row
-            # 清理：只删已经过期的窗口，绝不删还在计数的条目。
-            #
-            # 复用模块级的 _evict_stale_attempts()（它带完整的缺陷说明），
-            # 而不是在这里再内联一遍 —— 两处各写一份早晚会漂移。
-            if len(state) > 500:
-                _evict_stale_attempts(state, now)
-        result = portal.redeem(store, ident["key"] or {"owner": uid}, code)
-        # ⚠️ 这里没有「成功就清计数」的分支 —— 那正是上面说的缺陷。
-        security.audit({"username": ident["member"]["email"] if ident.get("member")
-                               else "key:" + str((ident.get("key") or {}).get("name", "")),
-                        "role": "member"},
-                       "me_redeem", bucket,
-                       "面额 " + str(result.get("credit")) + " 积分；来源 " + client_ip(req))
-        return result
-
-    @app.get("/me/api/keys")
-    async def me_keys(req: Request):
-        return {"keys": me_keys_of(me_identity(req))}
-
-    # ── 管理端：充值 / 兑换码 ────────────────────────────────────────
-    @app.get("/admin/api/billing/stats")
-    async def billing_stats(req: Request):
-        viewer(req)
-        with store.lock:
-            balances = {u: redemption.from_milli(int(v.get("milli", 0)))
-                        for u, v in (store.data.get("balances") or {}).items()}
-        return {"stats": redemption.stats(store), "balances": balances}
-
-    @app.post("/admin/api/billing/recharge")
-    async def billing_recharge(req: Request):
-        actor = admin(req)
-        body = await payload(req)
-        username = str(body.get("username") or "").strip()
-        if not username:
-            raise HTTPException(400, "请选择要充值的用户")
-        if not any(u.get("username") == username for u in store.data.get("users", [])):
-            raise HTTPException(404, f"用户 {username} 不存在")
-        credit = body.get("credit")
-        try:
-            credit = float(credit)
-        except (TypeError, ValueError):
-            raise HTTPException(400, "充值金额必须是数字")
-        # 上限防手滑：多打一个 0 就是 10 倍的钱。
-        if credit <= 0 or credit > 1_000_000:
-            raise HTTPException(400, "充值金额需在 0–1,000,000 积分之间")
-        result = redemption.grant(store, username, credit, kind="recharge",
-                                  note=str(body.get("note") or "管理员充值")[:120],
-                                  actor=actor.get("username", ""))
-        security.audit(actor, "recharge", username,
-                       f"充值 {credit:g} 积分；来源 {client_ip(req)}")
-        return result
-
-    @app.post("/admin/api/billing/spend")
-    async def billing_spend(req: Request):
-        actor = admin(req)
-        body = await payload(req)
-        username = str(body.get("username") or "").strip()
-        if not username:
-            raise HTTPException(400, "请选择用户")
-        credit = body.get("credit")
-        try:
-            credit = float(credit)
-        except (TypeError, ValueError):
-            raise HTTPException(400, "扣减金额必须是数字")
-        if credit <= 0:
-            raise HTTPException(400, "扣减金额必须大于 0")
-        result = redemption.spend(store, username, credit,
-                                  note=str(body.get("note") or "管理员扣减")[:120])
-        security.audit(actor, "spend", username, f"扣减 {credit:g} 积分")
-        return result
-
-    @app.get("/admin/api/billing/flows")
-    async def billing_flows(req: Request):
-        viewer(req)
-        return {"flows": redemption.list_flows(store,
-                                               username=(req.query_params.get("username") or "").strip(),
-                                               limit=int(req.query_params.get("limit") or 200))}
-
-    @app.get("/admin/api/billing/codes")
-    async def billing_list_codes(req: Request):
-        viewer(req)
-        return {"codes": redemption.list_codes(store,
-                                               batch=(req.query_params.get("batch") or "").strip(),
-                                               status=(req.query_params.get("status") or "all").strip(),
-                                               limit=int(req.query_params.get("limit") or 200))}
-
-    @app.post("/admin/api/billing/codes")
-    async def billing_create_codes(req: Request):
-        actor = admin(req)
-        body = await payload(req)
-        result = redemption.create_batch(
-            store, count=body.get("count"), credit=body.get("credit"),
-            note=str(body.get("note") or "")[:120], actor=actor.get("username", ""),
-            expires_at=body.get("expires_at"))
-        security.audit(actor, "create_codes", result["batch"],
-                       f"生成 {result['count']} 张 × {result['credit']:g} 积分")
-        return result
-
-    @app.post("/admin/api/billing/codes/{code_id}/disable")
-    async def billing_disable_code(code_id: str, req: Request):
-        actor = admin(req)
-        with store.lock:
-            hit = next((h for h in store.data.get("redemption_codes", {}) if h.startswith(code_id)), None)
-            if not hit:
-                raise HTTPException(404, "兑换码不存在")
-            store.data["redemption_codes"][hit]["enabled"] = False
-        store.save()
-        security.audit(actor, "disable_code", code_id, "停用兑换码")
-        return {"ok": True}
-
-    # ── 用户管理（终端用户 / members）────────────────────────────────
-    #
-    # ⚠️ 这不是上面那个 `/admin/api/users`。 那个管的是「控制台账号」
-    # （username + role ∈ admin/viewer/session_admin），用来登录 8787 后台，
-    # 桌面端已有 UsersPanel 在用。这里管的是终端用户：邮箱注册、有积分余额、
-    # 是 API 调用的计费主体。两者是完全不同的东西。
-    #
-    # 路径特意避开 `/admin/api/users`：FastAPI 同路径重复注册是「先注册者胜」，
-    # 照抄契约草稿里那一行会让本段端点永远路由不到；而改现有端点会直接
-    # 打爆 UsersPanel 与现有的 4 个控制台账号端点。
-    #
-    # ── 守卫分档 ──
-    #   GET  列表 / 详情      → viewer(req)              只读角色可看
-    #   PATCH 改角色 / 启停   → admin(req)               不是不可逆
-    #   POST  调余额          → require_session_admin     直接改钱
-    #   DELETE 删用户         → require_session_admin     不可逆 + 动钱
-    # 与现有 `/admin/api/users`（增/改/删走 session_admin）同档。
-    #
-    # 两端都能通过：`admin(req)` → `security.current_user(req)` 优先读
-    # `X-Admin-Token` 头、退回管理 cookie。桌面端 SPA 走 `credentials:"omit"`
-    # + 头令牌（`src/lib/reverse-proxy.ts:82-87`），所以只认 cookie 会让它全 401。
-    #
-    # ── 顺序：先鉴权，后看路径参数 ──
-    # 所有 handler 第一行就是拿身份。越权调用（匿名 / 只读角色 / wbt_ 令牌会话）
-    # 一律拿 401 或 403，不会先返回「用户不存在」 —— 否则 404 与 403 的差别
-    # 本身就是一个「这个 uid 存不存在」的探测器。
-    #
-    # ══ 用户账号 ══════════════════════════════════════════════
-    #
-    # 这一整段是终端用户的账号体系：邮箱注册 / 登录 / 会话 / 验证码。
-    # 与 `/admin/api/users`（控制台账号）完全是两套东西，永不共用存储键，
-    # 也永不共用端点。
-    #
-    # 存储键全部是新的（`members` / `member_index_email` / `member_sessions` /
-    # `email_codes`），老 `state.json` 不需要迁移。`users` 键绝对不碰。
-
-    accounts.ensure(store)
-
-    def _set_user_cookie(response, sid: str, req: Request):
-        """下发用户会话 cookie。
-
-        `secure` **复用现有 `_cookie_secure(req)`** —— 自己另写一套判断迟早会
-        和它对不上。硬编码 Secure 会让明文 HTTP 登录直接失效：
-        登录返回 200、cookie 也下发了，但后续每个请求都 401，
-        界面表现为「登录成功后立刻弹回登录页」，且没有任何报错可查。
-        """
-        response.set_cookie(accounts.COOKIE, sid,
-                            **accounts.cookie_params(_cookie_secure(req)))
-        return response
-
-    def _clear_user_cookie(response, req: Request):
-        """清掉用户 cookie。**path 必须与 set_cookie 一致** ——
-        否则浏览器里会留下一条同名的旧 cookie，用户「点了退出却还登着」。
-        """
-        response.delete_cookie(accounts.COOKIE, path=accounts.COOKIE_PATH)
-        return response
-
-    def _user_json(result: dict, req: Request) -> JSONResponse:
-        """注册 / 登录的 200 响应：下发（或续期）会话 cookie。
-
-        `sid` 必须在这里被摘掉。 `accounts.register/login` 返回 {user, sid}，
-        其中 sid 是明文会话 id；它只应该进 Set-Cookie 头，绝不该进响应体 ——
-        httponly 的意义就是「脚本读不到它」，原样返回等于自己把它交出去。
-        """
-        data = dict(result)
-        sid = str(data.pop("sid", ""))
-        response = JSONResponse({"ok": True, "user": data["user"]})
-        if sid:
-            _set_user_cookie(response, sid, req)
-        return response
-
-    @app.get("/login/api/options")
-    async def login_options():
-        """**匿名**：登录页靠它决定「显示不显示注册入口、要不要验证码」。
-
-        只回允许的那几个字段（见 `settings_store.public_options`），
-        而且**显式挑字段**而不是「全量减字段」—— 后者在将来加字段时会默认泄露。
-        特别是**不回 dev_mode**：匿名端点回任何配置细节都是在帮探测者。
-        """
-        return settings_store.public_options(store)
-
-    # ── 用户系统总闸 ───────────────────────────────────────
-    #
-    # ⚠️ 边界：这个闸关的是「用户体系」，不是「整个反代服务」。
-    #
-    #   被关掉：匿名注册、匿名登录、用户中心（/login/api/me）、
-    #           门户的会话身份（/portal/api/* 用 cookie 登录的那条路）
-    #   不受影响：`/v1` 的 API Key 直连 —— 那是本项目的核心服务，
-    #            与「用户体系」是两件事。管理员关掉用户体系之后，
-    #            已经发出去的密钥必须照常能用；否则这个开关一拨，
-    #            所有人的服务同时中断，它就从「功能开关」变成了「停机按钮」。
-    #
-    # 所以门户这里只挡会话身份：`/portal/api/*` 仍然接受 Bearer 密钥，
-    # 那是密钥直连的延伸（见 portal_identity 的 kind）。
-    def require_user_system() -> None:
-        """总闸关着就 403。所有用户侧入口**第一行**调用它。
-
-        用 403 而不是 404：这不是「找不到」，是「管理员关了」，
-        用户需要能看懂并去联系管理员（404 会让人以为地址敲错了）。
-        """
-        reason = settings_store.user_system_off_reason(settings_store.load(store))
-        if reason:
-            raise HTTPException(403, reason)
-
-
-    @app.post("/login/api/register")
-    async def login_register(req: Request):
-        require_user_system()
-        body = await payload(req)
-        result = accounts.register(
-            store,
-            email=str(body.get("email") or ""),
-            password=body.get("password") or "",
-            code=body.get("code"),
-            ip=accounts.request_ip(req),
-        )
-        uid = result["user"]["id"]
-        security.audit({"username": "member:" + uid, "role": "member"},
-                       "member_register", uid,
-                       "邮箱=" + str(result["user"]["email"]) + "；来源 " + client_ip(req))
-        return _user_json(result, req)
-
-    @app.post("/login/api/send-code")
-    async def login_send_code(req: Request):
-        require_user_system()
-        body = await payload(req)
-        email = str(body.get("email") or "")
-        settings = settings_store.load(store)
-        result = accounts.send_code(store, email, accounts.request_ip(req),
-                                    purpose=str(body.get("purpose") or "register"),
-                                    settings=settings)
-        # 验证码只在开发出口真的生效时才出现在响应里。
-        # `accounts.send_code` 用 `delivered` 告诉我们它有没有打 SMTP：
-        #   · delivered=True  → 走的是真投递，`code` 恒为空串；
-        #   · delivered=False → 走的 dev 出口（WB_DEV_MAIL=1 且没配 SMTP），
-        #     此时才把码回给调用方，并显式标记 dev_mode。
-        # 不标的话没人分得清「线上也这样」还是「只是本地」。
-        #
-        # ⚠️ dev 出口只对本机回码。
-        #
-        # 原先这里无条件 return result —— 只要进程带了 WB_DEV_MAIL=1，
-        # 任何一个匿名请求都能 POST 一个别人的邮箱、拿到验证码、再用它注册。
-        # 漏洞：匿名发码能拿回 code，再用别人的邮箱注册成功
-        # （email_verified=true），等于冒名占用他人邮箱。
-        #
-        # dev 出口的全部理由是「本机自测方便」，那就把回码限制在本机来源。
-        # 远程来源即使进程误开了 WB_DEV_MAIL，也只能拿到 `delivered=false`
-        # 这个事实，拿不到码本身 —— 攻击面从「任何能访问到该端口的人」
-        # 收敛到「已经能在本机执行请求的人」（后者本来就等于拿到了 state.json）。
-        if result.get("delivered") is False and not _dev_caller(req):
-            result = {**result, "code": "", "dev_mode": False}
-        return result
-
-    @app.post("/login/api/login")
-    async def login_login(req: Request):
-        require_user_system()
-        body = await payload(req)
-        result = accounts.login(store,
-                                email=str(body.get("email") or ""),
-                                password=body.get("password") or "",
-                                ip=accounts.request_ip(req))
-        return _user_json(result, req)
-
-    @app.post("/login/api/logout")
-    async def login_logout(req: Request):
-        """登出。幂等 —— 没登录、会话已过期、cookie 坏了，一律 200。
-
-        不能改成 401：前端会把失败弹 toast，用户看到的是「退不出去」。
-        登出的语义是清干净当前登录态，没登录本来就是目标状态。
-        """
-        accounts.logout(store, req)
-        return _clear_user_cookie(JSONResponse({"ok": True}), req)
-
-    @app.get("/login/api/me")
-    async def login_me(req: Request):
-        require_user_system()
-        return {"ok": True, "user": accounts.current_member(store, req)}
-
-    @app.post("/login/api/password")
-    async def login_password(req: Request):
-        require_user_system()
-        user = accounts.current_member(store, req)
-        body = await payload(req)
-        accounts.change_password(store, user["id"],
-                                 str(body.get("old") or ""), str(body.get("new") or ""))
-        # 改密码会吊销该用户全部会话（含本次）。所以必须重下发一条，
-        # 否则「改完密码自己也被踢出去了」，用户会以为改坏了。
-        sid = accounts.start_session(store, user["id"])
-        security.audit({"username": "member:" + user["id"], "role": "member"},
-                       "member_password", user["id"], "来源 " + client_ip(req))
-        return _set_user_cookie(JSONResponse({"ok": True, "relogin": True}), sid, req)
-
-    # ── `/login/api/*` 结束 ───────────────────────────────────────
-
     # ══ 服务设置 ══════════════════════════════════════════════
     #
-    # 端点：GET/PUT /admin/api/settings、POST /admin/api/settings/smtp-test。
+    # 端点：GET/PUT /admin/api/settings。
 
     @app.get("/admin/api/settings")
     async def get_settings(req: Request):
-        viewer(req)   # 只读角色也能看设置（了解「注册开着吗」是合理需求）
+        viewer(req)   # 只读角色也能看设置
         return settings_store.public_view(settings_store.load(store))
 
     @app.put("/admin/api/settings")
@@ -2319,18 +1764,6 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
                        "字段=" + (fields or "(空)") + "；来源 " + client_ip(req))
         return saved
 
-    @app.post("/admin/api/settings/smtp-test")
-    async def smtp_test(req: Request):
-        actor = session_admin(req)
-        body = await payload(req)
-        result = mailer.send_test(settings_store.load(store),
-                                  to_addr=str(body.get("to") or ""),
-                                  password=str(body.get("password") or ""))
-        security.audit(actor, "smtp_test", "",
-                       ("成功 → " if result.get("ok") else "失败 → ")
-                       + str(result.get("to") or body.get("to") or "")
-                       + "；来源 " + client_ip(req))
-        return result
 
     # ── 服务设置结束 ──────────────────────────────────────────────
 
@@ -2339,30 +1772,6 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
     # ⚠️ 本段必须注册在 `app.mount("/", converter.app)` 之前 ——
     # 那是兜底挂载，落在它后面的路由一律 404。
 
-    def _member_actor(req: Request) -> dict:
-        """把管理员身份包装成 members 层的 actor。"""
-        user = security.current_user(req)
-        return {"username": user.get("username", ""),
-                "role": user.get("role", ""),
-                "member_id": getattr(req.state, "member_id", None)}
-
-    def _revoke_member(uid: str) -> int:
-        """踢掉某成员的全部用户会话。
-
-        `accounts` 落地后用它；没落地时返回 0（会话还不存在，没什么可踢）。
-        绝不能静默失败 ——「改了角色/禁用了，但攻击者还挂着」是安全事件，
-        不是可以吞掉的异常。所以这里只在「函数不存在」时跳过，
-        真报了异常就让它冒出去（管理员会看到 500，而这比静默放行好得多）。
-        """
-        try:
-            from . import accounts as accounts_mod
-        except ImportError:
-            return 0
-        for name in ("revoke_member_sessions", "revoke_user_sessions"):
-            fn = getattr(accounts_mod, name, None)
-            if callable(fn):
-                return int(fn(store, uid) or 0)
-        return 0
 
     def _int_param(raw, default: int) -> int:
         """query 参数一律是字符串，脏值吃成默认值 —— 不能让它变成 500。"""
@@ -2371,107 +1780,6 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
         except (TypeError, ValueError):
             return default
 
-    @app.post("/admin/api/members")
-    async def member_create(req: Request):
-        """管理员分发账号（对应「给您分发账号登录」那条出路）。
-
-        与自助注册共用 `members.create()` —— 密码哈希、邮箱唯一性、
-        索引维护只有一处实现，两边不可能漂移。
-
-        守卫用 `admin(req)` 而不是 `viewer`：建账号能直接造出一个后台管理员，
-        但它不是不可逆的（可以删/降级），所以不必上 `session_admin`。
-        """
-        actor = admin(req)
-        body = await payload(req)
-        row = members_svc.create(
-            store,
-            email=body.get("email", ""),
-            password=body.get("password", ""),
-            role=str(body.get("role") or "user"),
-            # 管理员亲手分发 = 已确认身份。
-            # 自助注册那条路才有「验证过没有」的问题。
-            email_verified=bool(body.get("email_verified", True)),
-        )
-        security.audit(actor, "create_member", row["id"],
-                       f"邮箱={row['email']} 角色={row['role']}；来源 {client_ip(req)}")
-        return members_svc.view(store, row)
-
-    @app.get("/admin/api/members")
-    async def list_members(req: Request):
-        viewer(req)   # 只读角色也能看列表
-        return members_svc.list_members(
-            store,
-            q=req.query_params.get("q") or "",
-            page=_int_param(req.query_params.get("page"), 1),
-            size=_int_param(req.query_params.get("size"),
-                            members_svc.DEFAULT_PAGE_SIZE),
-        )
-
-    @app.get("/admin/api/members/stats")
-    async def member_stats(req: Request):
-        viewer(req)
-        return members_svc.stats(store)
-
-    @app.get("/admin/api/members/{uid}")
-    async def member_detail(uid: str, req: Request):
-        viewer(req)
-        return members_svc.detail(store, uid,
-                                  flow_limit=_int_param(req.query_params.get("flows"), 50))
-
-    @app.patch("/admin/api/members/{uid}")
-    async def member_update(uid: str, req: Request):
-        actor = admin(req)
-        body = await payload(req)
-        row = members_svc.update(store, uid, body, actor=_member_actor(req))
-        # 改角色 / 禁用后必须立刻踢会话。角色变了还留着旧会话，
-        # 等于「降级之后攻击者还挂着」—— 本项目在管理员侧栽过一次
-        # （见 security.revoke_user_sessions 的长注释）。
-        finished = members_svc.by_id(store, uid) or {}
-        revoked = 0
-        if finished.get("status") == "disabled" or "role" in body:
-            revoked = _revoke_member(uid)
-        security.audit(actor, "update_member", uid,
-                       f"role={finished.get('role')} status={finished.get('status')}"
-                       f" revoked={revoked}；来源 {client_ip(req)}")
-        out = members_svc.view(store, finished)
-        out["sessions_revoked"] = revoked
-        # 禁用了自己（管理员本身也是终端用户时）→ 告诉他需要重登，
-        # 与现有 /admin/api/users/{username} 的 relogin_required 口径一致。
-        out["relogin_required"] = bool(
-            revoked and _member_actor(req).get("member_id") == str(uid))
-        return out
-
-    @app.post("/admin/api/members/{uid}/balance")
-    async def member_balance(uid: str, req: Request):
-        # 直接改钱的端点。拒 `wbt_` 令牌身份 —— 与现有
-        # `/admin/api/tokens`、`/admin/api/users` 的写接口同档。
-        actor = session_admin(req)
-        body = await payload(req)
-        delta = body.get("delta_credit", body.get("delta"))
-        result = members_svc.adjust_balance(
-            store, uid, delta, str(body.get("reason") or ""),
-            actor=actor.get("username", ""))
-        # 走 redemption.grant/spend → add_flow，流水已经写了。
-        # 金额按「厘」整数，禁止浮点累加（本项目被 banker's rounding 坑过）。
-        security.audit(actor, "adjust_member_balance", uid,
-                       f"增量 {result['delta_credit']:g} 积分（{result['balance_milli']} 厘）；"
-                       f"来源 {client_ip(req)}")
-        return result
-
-    @app.delete("/admin/api/members/{uid}")
-    async def member_delete(uid: str, req: Request):
-        # 不可逆 + 动钱，同样拒令牌身份。
-        actor = session_admin(req)
-        force = str(req.query_params.get("force") or "").strip().lower() in ("1", "true", "yes")
-        result = members_svc.delete(store, uid, force=force, actor=_member_actor(req))
-        _revoke_member(uid)
-        security.audit(actor, "delete_member", uid,
-                       f"邮箱={result['email']} 解绑 {result['keys_unbound']} 枚密钥"
-                       f" 释放 {result['released_credit']:g} 积分 force={force}；"
-                       f"来源 {client_ip(req)}")
-        return result
-
-    # ── `/admin/api/members/*` 结束 ───────────────────────────────
 
     app.mount("/", converter.app)
     return app
@@ -2510,8 +1818,8 @@ def _forwarded_allow_ips() -> str:
 
 
 if __name__ == "__main__":
-    # 默认绑 127.0.0.1：`/admin/` 与用户门户/登录页同端口同进程，
-    # 绑 0.0.0.0 等于把管理面一起摊到所有网卡上。对外暴露请走外部反代
+    # 默认绑 127.0.0.1：管理面只在回环上监听，
+    # 绑 0.0.0.0 等于把它摊到所有网卡上。对外暴露请走外部反代
     # （反代终止 TLS → 转发到 127.0.0.1:8787），
     # 或显式传 `--host 0.0.0.0` 并同步设置 WB_FORWARDED_ALLOW_IPS。
     _host = os.environ.get("WB_SERVE_HOST", "").strip() or "127.0.0.1"

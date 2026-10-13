@@ -25,6 +25,7 @@ from pathlib import Path
 
 import uvicorn
 
+from admin import settings_store
 from admin.server import create_app
 from admin.switch_store import SwitchStore, switch_accounts_path
 
@@ -110,6 +111,11 @@ def build_app(argv=None):
     args = parse_args(argv)
     root = args.data or str(default_data_root())
     accounts = Path(args.accounts) if args.accounts else switch_accounts_path()
+
+    # 密钥文件必须跟着运行数据目录走。不设这一步的话，冻结成 exe 后
+    # settings_store 会退回 `__file__` 旁（= %TEMP%\_MEIxxxxx/data/），
+    # 每次重启换一把密钥，已保存的 SMTP 授权码就永久解不开了。
+    settings_store.set_runtime_data_root(root)
 
     admin_key = (os.environ.get("ADMIN_KEY") or os.environ.get("WB_ADMIN_PASSWORD") or "").strip()
     # 没显式配就现场随机一个：Store 要求密钥至少 20 位，首启管理员口令也要靠它兜底。
@@ -203,6 +209,32 @@ def print_banner(info: dict) -> None:
     print(" 按 Ctrl+C 停止服务", file=sys.stderr)
 
 
+def proxy_headers_enabled() -> bool:
+    """要不要让 uvicorn 采信 `X-Forwarded-*`。与 `WB_TRUST_PROXY` 同一个开关。
+
+    必须与 iputil 保持一致：uvicorn 这一层会在应用之前就改写 peer，
+    只关 iputil 那边等于没关。
+    """
+    from admin.iputil import trust_proxy
+    return trust_proxy()
+
+
+def forwarded_allow_ips() -> str:
+    """uvicorn 采信转发头的来源白名单。默认只信本机。
+
+    挂反代时用 `WB_FORWARDED_ALLOW_IPS` 写出反代地址（逗号分隔）。
+    """
+    raw = os.environ.get("WB_FORWARDED_ALLOW_IPS", "").strip()
+    if raw:
+        values = [x.strip() for x in raw.split(",") if x.strip()]
+        if "*" in values:
+            print("[reverse-proxy] 警告：WB_FORWARDED_ALLOW_IPS 含 '*'，"
+                  "等于信任任意来源的 X-Forwarded-* 头。请改为具体的反代地址。",
+                  file=sys.stderr)
+        return ",".join(values)
+    return "127.0.0.1"
+
+
 def main() -> None:
     multiprocessing.freeze_support()  # PyInstaller onefile 下必须
     args = parse_args()
@@ -219,7 +251,11 @@ def main() -> None:
             webbrowser.open(base + "/admin/")
         except Exception:  # noqa: BLE001 - 打不开浏览器不该影响服务启动
             pass
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    # proxy_headers 必须显式传：uvicorn 默认会在应用之前就用 X-Forwarded-For
+    # 改写 scope["client"]，让 iputil 那道「只在 peer 可信时才信转发头」的闸门失效。
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning",
+                proxy_headers=proxy_headers_enabled(),
+                forwarded_allow_ips=forwarded_allow_ips())
 
 
 if __name__ == "__main__":

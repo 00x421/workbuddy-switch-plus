@@ -348,9 +348,11 @@ class Security:
         except HTTPException as exc:
             record, session_err = None, exc
         if record:
+            # role 缺省用 viewer，与其余几处一致。真出现缺 role 的记录时
+            # 宁可降权 —— 这里默认 admin 等于「数据缺了就自动提权」。
             return {
                 "username": record.get("username", "admin"),
-                "role": record.get("role", "admin"),
+                "role": record.get("role") or "viewer",
                 "via": record.get("via", "session"),
             }
         token = self._bearer_token(req)

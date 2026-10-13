@@ -43,6 +43,7 @@ hiddenimports = [
     "anyio._backends._asyncio",
     # 本项目的包：serve.py 里有 import，但显式列出可避免被误裁
     "admin",
+    "admin.assets",
     "admin.browser_login",
     "admin.iputil",
     "admin.keysvc",

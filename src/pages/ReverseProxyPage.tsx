@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   Activity, BookOpen, KeyRound, LayoutDashboard, LogOut, Network, PlugZap, RefreshCw, ScrollText,
-  Server, Settings2, ShieldCheck, Ticket, UserRound, Users, Layers,
+  Server, Settings2, ShieldCheck, Ticket, Users, Layers,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -26,7 +26,6 @@ import { SecurityPanel } from "@/components/reverse-proxy/security-panel";
 import { ServiceControl } from "@/components/reverse-proxy/service-control";
 import { TokensPanel } from "@/components/reverse-proxy/tokens-panel";
 import { UsersPanel } from "@/components/reverse-proxy/users-panel";
-import { MembersPanel } from "@/components/reverse-proxy/members-panel";
 import { ServiceSettingsPanel } from "@/components/reverse-proxy/service-settings-panel";
 import { Banner, CopyButton, ToneBadge } from "@/components/reverse-proxy/rp-shared";
 import { cn } from "@/lib/utils";
@@ -60,12 +59,8 @@ const NAV: { group: string; items: { value: string; label: string; icon: typeof 
     ],
   },
   {
-    // 「用户管理」与「服务设置」是本次新增的终端用户体系（邮箱注册 + 积分余额）。
-    // 下面的「后台账号」是既有的控制台登录账号，两套东西分开放、分开叫，
-    // 否则管理员会把它们当成同一个东西。
-    group: "用户",
+    group: "服务",
     items: [
-      { value: "members", label: "用户管理", icon: UserRound },
       { value: "service-settings", label: "服务设置", icon: Settings2 },
     ],
   },
@@ -235,25 +230,6 @@ export default function ReverseProxyPage() {
         <StatusFact label="账号" value={`${enabled} / ${overview.accounts.length} 启用`} />
         <StatusFact label="API 密钥" value={String(overview.keys.length)} />
         <StatusFact label="当前账号" value={active ? active.name : "无"} />
-        {/* 用户登录页的入口放在这里：它是**发给用户**的地址，
-            管理员需要一个能直接复制的地方，而不是自己把 /admin/ 改成 /login。
-
-            2026-10 用户裁定：整个 /portal/ 已删除（页面 + /portal/api/*），
-            用户侧入口改为 /login。所以这里指向 /login，标签也从
-            「用户门户」改成「用户登录」—— 那个页面上现在只有一个登录表单，
-            叫「门户」会让管理员以为那里还能看用量和余额。 */}
-        <span className="flex items-center gap-2">
-          <span className="text-muted-foreground">用户登录</span>
-          <a
-            className="font-mono text-primary underline-offset-2 hover:underline"
-            href={getBaseUrl().replace(/\/$/, "") + "/login"}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            /login
-          </a>
-          <CopyButton value={getBaseUrl().replace(/\/$/, "") + "/login"} label="" className="h-6 px-2" />
-        </span>
       </div>
 
       <Tabs
@@ -309,10 +285,6 @@ export default function ReverseProxyPage() {
           </TabsContent>
           <TabsContent value="keys" className="mt-0">
             <KeysPanel overview={overview} reload={loadOverview} />
-          </TabsContent>
-          {/* 用户管理：终端用户（邮箱注册 + 积分余额）。与下面的「后台账号」是两套东西。 */}
-          <TabsContent value="members" className="mt-0">
-            <MembersPanel session={session} />
           </TabsContent>
           <TabsContent value="service-settings" className="mt-0">
             <ServiceSettingsPanel />
