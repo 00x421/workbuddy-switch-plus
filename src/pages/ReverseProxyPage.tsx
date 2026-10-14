@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
-  Activity, BookOpen, KeyRound, LayoutDashboard, LogOut, Network, PlugZap, RefreshCw, ScrollText,
+  Activity, BookOpen, Boxes, KeyRound, LayoutDashboard, LogOut, MailWarning, Network, PlugZap, RefreshCw, ScrollText,
   Server, Settings2, ShieldCheck, Ticket, Users, Layers,
 } from "lucide-react";
 
@@ -16,10 +16,12 @@ import { saveLogin, savedLogin, serviceSupported, type RpSavedLogin } from "@/li
 import { performSignOut, shouldAutoLogin } from "@/lib/sign-out";
 import { AddAccountDialog } from "@/components/reverse-proxy/add-account-dialog";
 import { AccountsPanel } from "@/components/reverse-proxy/accounts-panel";
+import { AlertsPanel } from "@/components/reverse-proxy/alerts-panel";
 import { EgressPanel } from "@/components/reverse-proxy/egress-panel";
 import { GroupsPanel } from "@/components/reverse-proxy/groups-panel";
 import { GuidePanel, TestPanel } from "@/components/reverse-proxy/test-guide-panel";
 import { KeysPanel } from "@/components/reverse-proxy/keys-panel";
+import { ModelsUsagePanel } from "@/components/reverse-proxy/models-usage-panel";
 import { OverviewPanel } from "@/components/reverse-proxy/overview-panel";
 import { RequestLogPanel } from "@/components/reverse-proxy/request-log-panel";
 import { SecurityPanel } from "@/components/reverse-proxy/security-panel";
@@ -59,9 +61,20 @@ const NAV: { group: string; items: { value: string; label: string; icon: typeof 
     ],
   },
   {
+    group: "模型",
+    items: [
+      // 用量统计与模型别名早就在后端跑（每个请求都落桶、别名在真实链路上解析），
+      // 但一直没有界面 —— 这两个页签是它们第一次可见。
+      { value: "models", label: "模型与用量", icon: Boxes },
+    ],
+  },
+  {
     group: "服务",
     items: [
       { value: "service-settings", label: "服务设置", icon: Settings2 },
+      // 告警放「服务」组而不是「运维」：它和站点名称一样是配置项，
+      // 不是日常盯的运维面板。放在这里也和网页端「设置」页对得上。
+      { value: "alerts", label: "告警通知", icon: MailWarning },
     ],
   },
   {
@@ -286,8 +299,14 @@ export default function ReverseProxyPage() {
           <TabsContent value="keys" className="mt-0">
             <KeysPanel overview={overview} reload={loadOverview} />
           </TabsContent>
+          <TabsContent value="models" className="mt-0">
+            <ModelsUsagePanel />
+          </TabsContent>
           <TabsContent value="service-settings" className="mt-0">
             <ServiceSettingsPanel />
+          </TabsContent>
+          <TabsContent value="alerts" className="mt-0">
+            <AlertsPanel />
           </TabsContent>
           <TabsContent value="tokens" className="mt-0">
             <TokensPanel tokens={tokens} reload={loadAccess} />

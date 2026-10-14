@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { AlertTriangle, ChevronDown, ChevronRight, FolderOpen, FolderSearch, Play, RefreshCw, ShieldAlert, Square, Terminal } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight, FolderOpen, FolderSearch, Globe, Play, RefreshCw, ShieldAlert, Square, Terminal } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Banner, CodeBlock, CopyButton, ToneBadge } from "@/components/reverse-proxy/rp-shared";
 import { getBaseUrl } from "@/lib/reverse-proxy";
 import {
-  adoptBaseUrl, serviceOpenDataDir, serviceSetExe, serviceStart, serviceStatus, serviceStop,
-  serviceStopElevated, serviceSupported,
+  adoptBaseUrl, serviceOpenDataDir, serviceRestartWithHost, serviceSetExe, serviceStart,
+  serviceStatus, serviceStop, serviceStopElevated, serviceSupported,
   type RpServiceStatus,
 } from "@/lib/reverse-proxy-service";
 
@@ -20,7 +20,7 @@ import {
 export function ServiceControl({ onServiceUp }: { onServiceUp?: () => void }) {
   const supported = serviceSupported();
   const [status, setStatus] = useState<RpServiceStatus | null>(null);
-  const [busy, setBusy] = useState<"" | "start" | "stop" | "elevate" | "exe" | "open" | "refresh">("");
+  const [busy, setBusy] = useState<"" | "start" | "stop" | "elevate" | "exe" | "open" | "refresh" | "lan">("");
   const [error, setError] = useState("");
   const [showLog, setShowLog] = useState(false);
   // 普通停止失败过之后，把「以管理员身份停止」顶到显眼位置——大多数停不掉都是权限问题。
@@ -113,6 +113,53 @@ export function ServiceControl({ onServiceUp }: { onServiceUp?: () => void }) {
     }
   }
 
+  /**
+   * 以 0.0.0.0 重启服务，让局域网内的其他设备也能访问。
+   *
+   * 监听地址是进程启动参数，改不了只能重启，所以这里一定是「先停后启」。
+   * 重启会短暂中断正在转发的请求 —— 提前用 toast 说清楚，别让用户以为服务崩了。
+   */
+  async function restartOnLan() {
+    if (!window.confirm(
+      "将以 0.0.0.0 重启反代服务，本机所在网络内的其他设备都能访问。\n\n" +
+      "· 服务会短暂中断几秒，正在转发的请求会失败重试。\n" +
+      "· 请确认这台机器的网络是可信的。\n\n" +
+      "继续吗？",
+    )) return;
+    setBusy("lan");
+    setError("");
+    try {
+      const next = await serviceRestartWithHost("0.0.0.0");
+      adoptBaseUrl(next);
+      apply(next);
+      toast.success("已以 0.0.0.0 重启，局域网内可访问");
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError(message);
+      toast.error("重启失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  /** 改回只绑本机。同样要重启。 */
+  async function restartOnLocalhost() {
+    setBusy("lan");
+    setError("");
+    try {
+      const next = await serviceRestartWithHost("127.0.0.1");
+      adoptBaseUrl(next);
+      apply(next);
+      toast.success("已改回只绑本机");
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError(message);
+      toast.error("重启失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function openDataDir() {
     setBusy("open");
     setError("");
@@ -170,6 +217,11 @@ export function ServiceControl({ onServiceUp }: { onServiceUp?: () => void }) {
   const running = status?.running ?? false;
   const tone = running ? "ok" : status?.starting ? "warn" : "muted";
   const label = running ? "运行中" : status?.starting ? "启动中" : "已停止";
+  // 判断当前是不是对外监听：看 baseUrl 里的主机部分。
+  // 用「包含 0.0.0.0」而不是严格相等，是因为 baseUrl 还带着协议与端口
+  // （如 http://0.0.0.0:8787），拆出来比对要多一层解析、还容易在
+  // IPv6/自定义主机上出岔子；这里只是决定按钮显示哪个文案，宽松一点没有副作用。
+  const lanExposed = running && /(^|\/\/)0\.0\.0\.0([:/]|$)/.test(status?.baseUrl ?? "");
 
   return (
     <section className="min-w-0 rounded-xl border border-border/70 bg-card">
@@ -196,6 +248,21 @@ export function ServiceControl({ onServiceUp }: { onServiceUp?: () => void }) {
                   服务本来就是刻意设计），拿 managed 当禁用条件会让人误以为「点了没效果」。 */}
               <Button variant="outline" size="sm" disabled={busy !== ""} onClick={() => void stop()}>
                 <Square className="size-3.5" />{busy === "stop" ? "停止中…" : "停止服务"}
+              </Button>
+              {/* 监听地址是 uvicorn 的启动参数，唯一改法是重启。
+                  runningBaseUrl 里如果已经是 0.0.0.0，这个按钮就变成「改回只绑本机」——
+                  否则用户开了之后没有任何界面路径能关掉它。 */}
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={busy !== ""}
+                title={lanExposed
+                  ? "改回只允许本机访问（会重启服务）"
+                  : "以 0.0.0.0 重启，让局域网内其他设备也能访问（会重启服务）"}
+                onClick={() => void (lanExposed ? restartOnLocalhost() : restartOnLan())}
+              >
+                <Globe className="size-3.5" />
+                {busy === "lan" ? "重启中…" : lanExposed ? "只绑本机" : "对局域网开放"}
               </Button>
               {/* 普通停止是在进程内直接结束占用端口的进程；只有那个进程属于别的用户
                   或更高权限时才会被拒，这时才需要提权。失败过就把它变成主按钮。 */}
@@ -231,6 +298,13 @@ export function ServiceControl({ onServiceUp }: { onServiceUp?: () => void }) {
             这个服务不是本次桌面端拉起的——可能是你自己双击了 exe，或上次关闭桌面端后它一直在跑，
             因此这里看不到它的输出。「停止服务」会按端口找到它并结束掉。
           </p>
+        ) : null}
+
+        {lanExposed ? (
+          <Banner tone="warn">
+            当前绑定了 0.0.0.0，本机所在网络内的其他设备可以访问这个服务。
+            若只是本机使用，点「只绑本机」改回 127.0.0.1。
+          </Banner>
         ) : null}
 
         <div className="grid min-w-0 gap-2">

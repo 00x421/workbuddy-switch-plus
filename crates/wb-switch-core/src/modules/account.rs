@@ -142,9 +142,32 @@ pub fn account_meta(acc: &Value) -> Value {
         "createdAt": display_value(acc, "createdAt"),
         "needsRelogin": acc.get("needs_relogin").and_then(|v| v.as_bool()) == Some(true),
         "needsReloginReason": display_value(acc, "needs_relogin_reason"),
+        // 企业版标记：读取时判定，供前端展示「企业版」徽标，历史数据零迁移。
+        "isEnterprise": is_enterprise_account(acc),
         // 档位随元数据下发，供宿主按档位过滤列表（缺省国内版，历史数据零迁移）。
         "variant": variant_of(acc).as_str(),
     })
+}
+
+/// 企业 ID 字段读取（兼容 camelCase `enterpriseId` 与 snake_case `enterprise_id`）。
+///
+/// 官方客户端以该字段是否存在分流个人版 / 企业版积分接口；请求头
+/// （[`build_auth_headers`]）与积分查询共用同一字段口径，不要各写一份。
+pub fn enterprise_id_of(account: &Value) -> Option<String> {
+    get_str(account, "enterpriseId").or_else(|| get_str(account, "enterprise_id"))
+}
+
+/// 是否企业版账号：有企业 ID 直接命中；历史备份可能只带 `type`，
+/// 故以 `ultimate` / `exclusive` 兜底判定。
+///
+/// 兜底判定命中但缺 ID 时，调用方需补拉一次企业 ID —— 见 credits 模块的
+/// 企业版分流，切勿在缺 ID 时回落到个人版接口（会把企业账号显示成「暂无可用积分」）。
+pub fn is_enterprise_account(account: &Value) -> bool {
+    enterprise_id_of(account).is_some()
+        || matches!(
+            get_str(account, "type").as_deref(),
+            Some("ultimate" | "exclusive")
+        )
 }
 
 /// 取非空字符串字段；空/缺失返回 None。
@@ -471,9 +494,7 @@ pub fn build_auth_headers(account: &Value) -> HashMap<String, String> {
     if let Some(uid) = get_str(account, "uid") {
         headers.insert("X-User-Id".to_string(), uid);
     }
-    if let Some(eid) =
-        get_str(account, "enterpriseId").or_else(|| get_str(account, "enterprise_id"))
-    {
+    if let Some(eid) = enterprise_id_of(account) {
         headers.insert("X-Enterprise-Id".to_string(), eid.clone());
         headers.insert("X-Tenant-Id".to_string(), eid);
     }

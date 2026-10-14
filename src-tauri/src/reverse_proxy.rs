@@ -357,6 +357,19 @@ pub fn reverse_proxy_status(state: tauri::State<'_, ReverseProxy>) -> Status {
 pub fn reverse_proxy_start(
     state: tauri::State<'_, ReverseProxy>,
     port: Option<u16>,
+    host: Option<String>,
+) -> Result<Status, String> {
+    start_service(&state, port, host)
+}
+
+/// 启动服务的**唯一实现**。命令与「以 0.0.0.0 重启」共用它。
+///
+/// `host` 为 `None` 时**不传 `--host`**，让服务走它自己的默认值（127.0.0.1），
+/// 保持既有行为完全不变 —— 只有用户显式点了「对局域网开放」才绑 0.0.0.0。
+fn start_service(
+    state: &ReverseProxy,
+    port: Option<u16>,
+    host: Option<String>,
 ) -> Result<Status, String> {
     let mut inner = state.lock();
 
@@ -365,6 +378,19 @@ pub fn reverse_proxy_start(
         None => inner.port.max(1),
     };
     inner.port = port;
+
+    // 只接受这两种地址。允许任意字符串会把 `--host` 变成参数注入面
+    // （比如传进 `--data` 之类的额外参数）。
+    let host = match host.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some("0.0.0.0") => Some("0.0.0.0".to_string()),
+        Some("127.0.0.1") => Some("127.0.0.1".to_string()),
+        Some(other) => {
+            return Err(format!(
+                "监听地址只能是 127.0.0.1 或 0.0.0.0，收到的是 {other}"
+            ))
+        }
+    };
 
     // 端口已经有人监听（可能是用户自己起的服务）就不再重复拉起。
     if port_open(port) {
@@ -393,7 +419,13 @@ pub fn reverse_proxy_start(
         .arg("--port")
         .arg(port.to_string())
         .arg("--data")
-        .arg(&data_dir)
+        .arg(&data_dir);
+    // 显式绑 0.0.0.0 时才传 --host：对外开端口是用户主动做的决定，
+    // 不能因为「界面上点过一次」就永久生效，所以不写进 saved。
+    if let Some(host) = &host {
+        command.arg("--host").arg(host);
+    }
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -414,6 +446,17 @@ pub fn reverse_proxy_start(
 
     inner.log.lock().unwrap_or_else(|p| p.into_inner()).clear();
     *inner.password.lock().unwrap_or_else(|p| p.into_inner()) = None;
+
+    // 绑定非本机地址是一条安全姿态的变更，必须在日志里留痕：
+    // 用户下次看到「怎么外网能访问」时，这里是唯一的线索。
+    if let Some(host) = &host {
+        if host == "0.0.0.0" {
+            inner.log.lock().unwrap_or_else(|p| p.into_inner()).push(format!(
+                "[WB-Switch-Plus] 已绑定 0.0.0.0:{port}，本机所在网络内的其他设备可以访问。\
+                 若不需要，请点「只绑本机」改回来。"
+            ));
+        }
+    }
 
     // 归位提示写进日志面板：这是用户只会在第一次启动时看到的一次性动作，
     // 不提示的话「管理口令变了没有」会变成一个说不清的问题。
@@ -442,6 +485,28 @@ pub fn reverse_proxy_start(
     let _ = save_saved(&saved);
 
     Ok(state.snapshot())
+}
+
+/// 以指定监听地址**重启**反代服务。
+///
+/// 用「先停后启」而不是改配置再热重载：服务的监听地址是 uvicorn 启动参数，
+/// 进程起来之后无法更改，重启是唯一的实现方式。停止走 `stop_service`，
+/// 因此「按端口反查监听者」那套收尾逻辑（PyInstaller onefile 必需）同样生效。
+#[tauri::command]
+pub fn reverse_proxy_restart_with_host(
+    state: tauri::State<'_, ReverseProxy>,
+    host: String,
+) -> Result<Status, String> {
+    let port = {
+        let inner = state.lock();
+        if inner.port == 0 {
+            DEFAULT_PORT
+        } else {
+            inner.port
+        }
+    };
+    stop_service(&state)?;
+    start_service(&state, Some(port), Some(host))
 }
 
 /// 服务数据目录：密钥、管理令牌、state.json 都在这里。

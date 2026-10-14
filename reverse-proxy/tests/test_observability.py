@@ -261,6 +261,57 @@ class ObservabilityHttpTests(unittest.IsolatedAsyncioTestCase):
         row = body["daily"][-1]
         self.assertEqual(row["by_model"]["glm-5.2"]["calls"], 2)
 
+    # ---- 请求日志：是哪个密钥发起的 ----
+    #
+    # 需求是「日志里看得出具体是哪个 key 请求的」。三兄弟各管一段：
+    #   key_id   稳定标识（用来 join 分组 / 配额）
+    #   key_name 人起的名字（写日志时就固化）
+    #   key_hint 密钥本身的脱敏片段
+
+    async def test_log_entry_carries_key_identity(self):
+        self.app.state.pool.log_request(None, "glm-5.2", 200, True, 10, 0.1, 100,
+                                        "success", "api",
+                                        key_id="k1", key_name="生产密钥",
+                                        key_hint="sk-ab…1234")
+        entry = self.app.state.pool.request_logs(1)[0]
+        self.assertEqual(entry["key_id"], "k1")
+        self.assertEqual(entry["key_name"], "生产密钥")
+        self.assertEqual(entry["key_hint"], "sk-ab…1234")
+
+    async def test_log_entry_without_key_has_no_name(self):
+        """直连 / 测试请求没有密钥 —— 必须是 None，不能编一个出来。"""
+        self.app.state.pool.log_request(None, "glm-5.2", 200, True, 10, 0.1, 100,
+                                        "success", "test")
+        entry = self.app.state.pool.request_logs(1)[0]
+        self.assertIsNone(entry["key_id"])
+        self.assertIsNone(entry["key_name"])
+
+    async def test_blank_key_name_becomes_none(self):
+        """空字符串要归一成 None，否则前端得同时判 null 和空串。"""
+        for value in ("", "   ", None):
+            self.app.state.pool.log_request(None, "m", 200, True, 0, 0, 1,
+                                            "success", "api", key_id="k1",
+                                            key_name=value)
+            self.assertIsNone(self.app.state.pool.request_logs(1)[0]["key_name"])
+
+    async def test_key_name_is_capped_and_whitespace_trimmed(self):
+        self.app.state.pool.log_request(None, "m", 200, True, 0, 0, 1, "success",
+                                        "api", key_id="k1", key_name="  名字  ")
+        self.assertEqual(self.app.state.pool.request_logs(1)[0]["key_name"], "名字")
+
+    async def test_key_name_survives_the_round_trip_to_disk(self):
+        """落盘再读回，key_name 不能丢 —— 重启后历史还得说得出是谁在用。"""
+        self.app.state.pool.log_request(None, "m", 200, True, 5, 0.2, 10,
+                                        "success", "api", key_id="k9",
+                                        key_name="重启前的密钥")
+        self.app.state.pool._append_request_log(
+            self.app.state.pool.request_logs(1)[0])
+        # 重新从文件加载
+        self.app.state.pool.request_log.clear()
+        self.app.state.pool._load_request_log()
+        names = [e.get("key_name") for e in self.app.state.pool.request_logs(50)]
+        self.assertIn("重启前的密钥", names)
+
     # ---- 模型别名：管理端 ----
 
     async def test_alias_roundtrip_and_audit(self):

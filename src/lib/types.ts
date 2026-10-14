@@ -30,6 +30,11 @@ export interface AccountMeta {
   createdAt: number | null;
   needsRelogin: boolean;
   needsReloginReason: string | null;
+  /**
+   * 企业版账号（有 enterpriseId，或 type 为 ultimate/exclusive）；
+   * 缺省（旧后端/历史账号）按非企业处理。
+   */
+  isEnterprise?: boolean;
   /** 账号所属档位；缺省（旧后端/历史账号）按国内版处理。 */
   variant?: WbVariant;
 }
@@ -582,6 +587,11 @@ export interface CreditExpiry {
   accountId?: string | null;
   accountName?: string;
   updatedAt?: number;
+  /**
+   * 企业配额是否不限量。为 true 时 `totalCapacity` / `totalRemaining` 均为 null，
+   * 界面显示「不限量」而不是把 null 当 0（否则看起来像额度用光了）。
+   */
+  unlimited?: boolean;
   totalCapacity?: number;
   totalRemaining?: number;
   expiringSoonRemaining?: number;

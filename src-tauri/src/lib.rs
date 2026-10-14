@@ -345,6 +345,7 @@ pub fn run() {
             companion::open_companion_settings,
             reverse_proxy::reverse_proxy_status,
             reverse_proxy::reverse_proxy_start,
+            reverse_proxy::reverse_proxy_restart_with_host,
             reverse_proxy::reverse_proxy_stop,
             reverse_proxy::reverse_proxy_stop_elevated,
             reverse_proxy::reverse_proxy_open_data_dir,

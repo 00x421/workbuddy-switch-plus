@@ -476,6 +476,11 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onShowInf
         </Tooltip>
       )}
       {!compact && activeProductCount >= 2 && <Badge variant="secondary" className={cn(chipClass, "text-muted-foreground")}>{activeProductCount} 个工具正在使用</Badge>}
+      {/* 企业版标注：身份属性优先于状态 chip。
+          紧凑卡片单行头部放不下（会挤掉账号名），徽标改在积分区显示。 */}
+      {!compact && account.isEnterprise && (
+        <Badge variant="secondary" className={cn(chipClass, "text-muted-foreground")}>企业版</Badge>
+      )}
     </>
   );
 
@@ -733,10 +738,16 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onShowInf
             <div className="flex items-baseline gap-x-3 gap-y-1">
               <span className="flex items-center gap-1.5">
                 <Sparkles className="size-4 shrink-0 stroke-[1.75] text-muted-foreground" aria-hidden="true" />
-                <strong className={cn("font-semibold leading-none tabular-nums tracking-[-0.025em]", compact ? "text-[20px]" : "text-[22px]")} style={{ fontFamily: '"Bricolage Grotesque Variable", "SF Pro Display", ui-sans-serif, sans-serif' }}>{formatCredits(credit.totalRemaining ?? 0)}</strong>
+                {credit.unlimited ? (
+                  <strong className={cn("font-semibold leading-none tracking-[-0.025em]", compact ? "text-[20px]" : "text-[22px]")}>不限量</strong>
+                ) : (
+                  <strong className={cn("font-semibold leading-none tabular-nums tracking-[-0.025em]", compact ? "text-[20px]" : "text-[22px]")} style={{ fontFamily: '"Bricolage Grotesque Variable", "SF Pro Display", ui-sans-serif, sans-serif' }}>{formatCredits(credit.totalRemaining ?? 0)}</strong>
+                )}
               </span>
-              <span className={cn("text-muted-foreground", compact ? "text-[11px]" : "text-xs")}>{resources.length} 个积分包</span>
-              <div className={cn("ml-auto flex items-center gap-1.5 text-muted-foreground", compact ? "text-[11px]" : "text-xs")} title={expiringAmount > 0 ? `${formatCredits(expiringAmount)} 积分将在 7 天内到期` : resources[0]?.expireAt ? `最近到期 ${formatCreditExpiry(resources[0].expireAt)}` : "当前积分长期有效"}>
+              <span className={cn("text-muted-foreground", compact ? "text-[11px]" : "text-xs")}>
+                {credit.unlimited ? "企业配额" : account.isEnterprise ? "企业配额" : `${resources.length} 个积分包`}
+              </span>
+              <div className={cn("ml-auto flex items-center gap-1.5 text-muted-foreground", compact ? "text-[11px]" : "text-xs")} title={credit.unlimited ? "企业配额不限量" : expiringAmount > 0 ? `${formatCredits(expiringAmount)} 积分将在 7 天内到期` : resources[0]?.expireAt ? `最近到期 ${formatCreditExpiry(resources[0].expireAt)}` : "当前积分长期有效"}>
                 <Clock3 className="size-3.5 shrink-0" />
                 <span className="whitespace-nowrap tabular-nums">{creditUpdatedAt ? `${formatCreditUpdatedAt(creditUpdatedAt)} 更新` : "—"}</span>
               </div>

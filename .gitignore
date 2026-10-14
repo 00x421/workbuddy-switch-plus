@@ -55,6 +55,10 @@ reverse-proxy/dist/
 # 只忽略 spec 备份；wb-reverse-proxy.spec 是构建脚本，必须入库（CI 靠它打 exe）
 reverse-proxy/*.spec.bak
 reverse-proxy/*.spec.orig
+# 打包时由 build-exe.py 生成、spec 负责打进包内的版本文件。
+# 它是构建产物（每次打包按 package.json 重写），入库只会制造无意义的 diff；
+# 版本的唯一来源是 package.json。
+reverse-proxy/version.json
 __pycache__/
 *.py[cod]
 

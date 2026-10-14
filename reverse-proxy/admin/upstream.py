@@ -86,11 +86,36 @@ def ok(env):
     return env.get("code") in (0, 200)
 
 
+def _dig_message(env):
+    """在信封里逐层找文案，找不到回空串。
+
+    上游把同一句话放在哪并不固定：顶层 `message` / `msg`，业务错误里的
+    `error` / `detail`，或者嵌在 `data.message` 里都真实见过。而
+    `envelope()` 在 HTTP >= 300 时**只要 body 是 dict 就原样返回**，
+    并不保证含 `message`。
+
+    只读顶层 `message` 的后果很隐蔽：调用方拿到的是自己那个兜底文案
+    （「领奖失败」之类），真正的原因被吞掉，排查时完全看不到上游说了什么。
+    """
+    if not isinstance(env, dict):
+        return ""
+    for key in ("message", "msg", "error", "detail", "reason", "error_message"):
+        value = env.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for key in ("data", "error", "detail", "result"):
+        nested = env.get(key)
+        if isinstance(nested, dict):
+            inner = _dig_message(nested)
+            if inner:
+                return inner
+    return ""
+
+
 def message_of(env, fallback="操作失败"):
-    raw = env.get("message") or env.get("msg") or ""
-    raw = str(raw).strip() or fallback
+    raw = _dig_message(env) or fallback
     # 上游的 business message 同样会回显请求头，回给界面 / 落盘前再过一次。
-    return redact(raw)[:MESSAGE_LIMIT]
+    return redact(str(raw))[:MESSAGE_LIMIT]
 
 
 def is_unauthorized(env):

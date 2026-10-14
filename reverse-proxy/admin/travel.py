@@ -23,6 +23,7 @@ import time
 from .upstream import BASE, MESSAGE_LIMIT  # noqa: F401  主机与截断长度：单一来源
 from .upstream import envelope as _envelope  # noqa: F401  测试与同族模块沿用的旧名
 from .upstream import is_unauthorized, message_of, ok, request
+from .upstream import _dig_message
 
 # 成长中心（含派猫猫旅行）所在主机 —— 由 admin/upstream.py 统一给出。
 # 旅行接口前缀（桌面端 config.rs 的 TRAVEL_API_PREFIX）。
@@ -153,21 +154,79 @@ def decide_action(state, daily_limit_reached):
     return "error"
 
 
-def classify_depart_error(code, message):
-    """派发失败归类。只看文案——HTTP 429 是限流，不是「今日已派」。
+def error_text(env):
+    """从信封里挖出「上游到底说了什么」，找不到回空串。
 
-    这条区分是有代价换来的：把限流当成当日完成，会白白丢掉一整天的旅行积分。
+    实现在 `upstream._dig_message` —— 单一来源。上游把同一句话放在哪并不固定
+    （顶层 `message`、业务错误里的 `error` / `detail`、或嵌在 `data.message`），
+    而 `upstream.envelope()` 在 HTTP >= 300 时只要 body 是 dict 就原样返回，
+    并不保证含 `message`。
+
+    只读顶层 `message` 的后果很隐蔽：分类器拿到空串 → 「今日已派完」被判成
+    失败 → 界面刷出「旅行派发失败：daily limit reached」，而且调度每轮都白打
+    一次上游。这里保留一个薄封装，是为了让分类逻辑读起来自解释，也避免
+    跨模块直接依赖一个下划线开头的私有函数。
+    """
+    return _dig_message(env)
+
+
+def classify_depart_error(code, message):
+    """派发失败归类。**只看文案，不看 HTTP 状态码。**
+
+    这条区分是有代价换来的：HTTP 429 是限流，把它当成「今日已派」会白白丢掉
+    一整天的旅行积分；反过来把「今日已派」当成限流，会让调度整天反复重试，
+    并且在界面上刷出一堆假告警。
+
+    匹配放宽到几组词而不是单个短语，是因为上游同一件事有多种说法：
+    `daily limit reached` / `daily travel limit reached` / `已达今日上限`。
+    漏判的后果不是文案难看 —— 是**「今天已经派完了」被判成失败**，于是
+    每轮都白打一次上游，界面上反复出现告警。
+
+    中文文案一并匹配：上游是中文产品，用户看到的那 6 条告警也可能来自
+    已经本地化过的响应，只认英文同样会漏。
     """
     text = str(message or "").lower()
-    if "already traveling" in text:
+    if "already traveling" in text or "正在旅行" in text:
         return "already_traveling"
-    if "daily limit" in text or "daily_limit" in text:
+    # 顺序有意放在 already_traveling 之后：两者都出现时，"already traveling"
+    # 是更具体、更可操作的结论。
+    if any(k in text for k in (
+        "daily limit", "daily_limit", "day limit", "limit reached",
+        "今日已", "已达今日", "今日上限", "明天再来", "次数已达",
+    )):
         return "daily_limit"
-    if "no active buddy" in text:
+    if "no active buddy" in text or "没有猫猫" in text or "未领养" in text:
         return "no_buddy"
-    if "location not available" in text:
+    if "location not available" in text or "地点不可用" in text or "地点无效" in text:
         return "location_unavailable"
     return "other"
+
+
+#: 上游英文文案 → 中文。**没有命中的一律保留原文**，不套一句「未知错误」——
+#: 原文是排查时唯一的线索，翻成笼统的中文反而把线索弄丢了。
+_DEPART_TEXT_CN = {
+    "buddy not found": "还没有领养猫猫",
+    "not activated": "成长中心尚未激活",
+    "too many requests": "请求过于频繁，稍后再试",
+    "rate limit": "请求过于频繁，稍后再试",
+    "service unavailable": "上游服务暂时不可用",
+    "internal error": "上游内部错误",
+    "invalid location": "旅行地点无效",
+    "travel disabled": "该账号未开启旅行",
+    "insufficient": "积分或条件不足",
+}
+
+
+def _depart_text(text, limit=60):
+    """把上游文案翻成中文，认不出就原样返回（截断到 limit）。"""
+    raw = str(text or "").strip()
+    if not raw:
+        return "上游未说明原因"
+    lowered = raw.lower()
+    for en, cn in _DEPART_TEXT_CN.items():
+        if en in lowered:
+            return f"{cn}（{raw[:limit]}）"
+    return raw[:limit]
 
 
 def arrive_at_secs(arrive_at):
@@ -199,6 +258,18 @@ def _int(value):
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _left_minutes(arrive_at, now):
+    """到到达时间还有几分钟。已到或算不出来返回 0。
+
+    向上取整：还剩 30 秒时说「0 分钟后到达」不如说「1 分钟」——
+    后者才让人知道「马上就好，不用管」。
+    """
+    seconds = arrive_at_secs(arrive_at) - int(now)
+    if seconds <= 0:
+        return 0
+    return (seconds + 59) // 60
 
 
 class TravelRunner:
@@ -265,8 +336,12 @@ class TravelRunner:
                     _apply_status(out, _status_fields(status.get("data") or {}))
                 return out
 
-            cls = classify_depart_error(env.get("code"), env.get("message"))
-            text = message_of(env, "派发失败")
+            # 用 error_text 而不是 env.get("message")：上游把文案放在
+            # data.message / error / detail 里的情况都真实存在，只读顶层的
+            # `message` 会让分类器拿到空串，把「今日已派」误判成失败。
+            raw_error = error_text(env)
+            cls = classify_depart_error(env.get("code"), raw_error)
+            text = message_of(env, "") or raw_error or "派发失败"
             if cls == "already_traveling":
                 return _result(aid, ok=True, already=True, state="traveling",
                                message="已在旅行中")
@@ -281,11 +356,17 @@ class TravelRunner:
             if cls == "location_unavailable":
                 unavailable = True
                 continue
-            return _result(aid, skip="error", message=text[:80])
+            # 兜底：文案已在上游翻不成中文时，至少带上「派发失败」的前缀，
+            # 让人一眼看出这是失败而不是某种成功后的提示。原文照附 —— 那是
+            # 唯一的排查线索，翻掉反而查不了。
+            return _result(aid, ok=False, already=False, skip="error",
+                           state="idle", message=f"旅行派发失败：{_depart_text(text)}")
 
         if unavailable:
-            return _result(aid, skip="location-unavailable", message="地点不可用")
-        return _result(aid, skip="error", message="派发失败")
+            return _result(aid, ok=False, already=False, skip="location-unavailable",
+                           state="idle", message="所有旅行地点当前都不可用，稍后再试")
+        return _result(aid, ok=False, already=False, skip="error",
+                       state="idle", message="旅行派发失败：上游没有返回可用的地点")
 
     # ── 对外：对账 / 领奖 ───────────────────────────────────────────────
     def sync(self, aid, prior=None):
@@ -293,10 +374,23 @@ class TravelRunner:
 
         Arrived 才领奖；`idle` 且已达上限记成当日结束。这两条都是「服务端说的
         算」——本地缓存的倒计时只用来决定**什么时候回查**，不用来决定领不领。
+
+        **必须先清掉上一轮的 message / skip。** `prior` 是上一次落盘的结果，
+        它带着当时的失败原因（比如「daily limit reached」）。这一轮查询成功时
+        若不清，那个旧原因会一直挂在新结果上 —— 表现是流水里出现
+        `ok=true` 却带着一句英文失败原因，界面上看起来像「成功了但又报了错」，
+        而人根本无从判断这句话属于哪一轮。旧结论只对产生它的那一轮有效。
         """
         result = dict(prior or {})
+        # 清掉上一轮的结论，只保留「行程本身」的字段（recordId / arriveAt / 地点）。
+        # 这几个是行程的客观属性，跨轮次依然成立，不能清。
+        result["message"] = ""
+        result["skip"] = None
+        result.pop("error", None)
+
         env = self._get(aid, PREFIX + "/status")
         if not ok(env):
+            result["ok"] = False
             result["skip"] = "status-error"
             result["message"] = message_of(env, "查询旅行状态失败")
             return result
@@ -310,6 +404,16 @@ class TravelRunner:
             result["claimed"] = False
             result["state"] = "traveling"
             _apply_status(result, fields)
+            # 文案由这里给全：上面清掉了上一轮的 message，不补就是空字符串。
+            name = str(result.get("locationName") or "").strip()
+            arrive = int(result.get("arriveAt") or 0)
+            if arrive > 0:
+                left = _left_minutes(arrive, self.clock())
+                result["message"] = (f"猫猫正在去{name}的路上，约 {left} 分钟后到达"
+                                     if name and left > 0 else
+                                     f"猫猫正在旅行中（{name}）" if name else "猫猫正在旅行中")
+            else:
+                result["message"] = f"猫猫正在旅行中（{name}）" if name else "猫猫正在旅行中"
         elif raw == "arrived":
             result["state"] = "arrived"
             result["ok"] = True
@@ -320,15 +424,20 @@ class TravelRunner:
                 _apply_daily_limit(result, fields, int(self.clock() * 1000))
             elif result_claimed(result):
                 result["state"] = "idle"
+                result["message"] = "今日已派"
             elif result.get("ok"):
                 self._claim(aid, result, record_id)
             else:
                 result["claimed"] = False
                 result["state"] = "idle"
+                # 还没派过：说清楚「今天可以派」而不是留空，
+                # 否则调度把人叫起来做一次查询，却什么都不告诉他。
+                result["message"] = "今日尚未派发"
         else:
+            result["ok"] = False
             result["skip"] = "status-error"
             result["claimed"] = False
-            result["message"] = f"unknown travel state: {raw}" if raw else "missing travel state"
+            result["message"] = f"上游返回了未知的旅行状态：{raw}" if raw else "上游没有返回旅行状态"
         return result
 
     def _claim(self, aid, result, record_id):

@@ -366,6 +366,39 @@ class PoolTravelTests(unittest.TestCase):
         return out
 
     # ── 适配契约 ─────────────────────────────────────────────────────
+    def test_network_failure_keeps_a_complete_state_shape(self):
+        """网络异常分支存下的形状必须与成功路径一致。
+
+        这一支以前只写 4 个键（skip/ok/claimed/message），没有 `state` ——
+        界面读 `state` 判档位，读到 undefined 就显示成「状态未知」，
+        而且上一轮的 recordId / arriveAt 被整个丢掉，途中那次行程从此找不回来。
+        """
+        import httpx
+
+        # 先放进一轮「已经在路上」的结果，模拟真实时序。
+        self.pool.set_travel_state(self.a, {
+            "ok": True, "claimed": False, "state": "traveling",
+            "recordId": "R-77", "arriveAt": (self.now + 600) * 1000,
+            "locationName": "奈良", "date": self.today})
+
+        def boom(**kw):
+            raise httpx.ConnectError("connection reset")
+
+        self.pool.client_factory = boom
+        result = self.pool.operate(self.a, "travel-claim")
+
+        self.assertFalse(result["ok"])
+        stored = self.pool.travel_state(self.a)
+        # 形状完整：界面要的 state 必须在，不能是 undefined。
+        self.assertIn("state", stored)
+        self.assertIsNotNone(stored["state"])
+        self.assertEqual(stored["skip"], "error")
+        # 行程线索保留：那次行程可能还在路上，不该因为一次网络抖动就忘掉。
+        self.assertEqual(stored["recordId"], "R-77")
+        self.assertEqual(stored["arriveAt"], (self.now + 600) * 1000)
+        # 凭据 / 原始响应不得进入落盘文案。
+        self.assertNotIn("Bearer", str(stored["message"]))
+
     def test_account_pool_satisfies_the_travel_runner_contract(self):
         """真账号池必须逐条满足 travel.CTX_PROTOCOL。
 
@@ -425,8 +458,7 @@ class PoolTravelTests(unittest.TestCase):
     def test_travel_claim_logs_the_reward(self):
         self.pool.set_travel_state(self.a, {"ok": True, "claimed": False,
                                             "state": "traveling"})
-        self.client.responses = [
-            FakeResponse(200, status_body("arrived", record_id=5, reward_credit=100)),
+        self.client.responses = [            FakeResponse(200, status_body("arrived", record_id=5, reward_credit=100)),
             FakeResponse(200, {"code": 0, "data": {"reward_credit": 100}}),
         ]
         result = self.pool.operate(self.a, "travel-claim")
@@ -553,6 +585,258 @@ class PoolTravelTests(unittest.TestCase):
                          "traveling")
         self.assertEqual(label({"date": "2000-01-01", "ok": True, "claimed": True}, self.today),
                          "untraveled")
+
+
+class StaleConclusionTests(unittest.TestCase):
+    """回归：`sync()` 不得把上一轮的结论挂在这一轮的结果上。
+
+    线上真实故障：流水里出现 `ok=true` 却带着上一轮的英文失败原因
+    （`daily limit reached`），界面上看起来像「成功了但又报了错」，
+    而且同一句英文在 20 条流水里反复出现，人根本判断不出它属于哪一轮。
+
+    根因是 `sync()` 以 `dict(prior or {})` 起手，成功后只改 `ok` 不清 `message`，
+    于是旧原因一直跟着新结果走，并被反复写进流水。
+
+    这一片测试盯的就是「上一轮的失败结论必须随轮次失效」。
+    """
+
+    def setUp(self):
+        self.now = 1_800_000_000
+        # 上一轮失败后的落盘结果 —— 这是每一轮 sync 的输入。
+        self.stale = {"skip": "error", "ok": False, "claimed": False,
+                      "message": "daily limit reached", "date": "2026-10-13"}
+
+    def _sync(self, body, prior=None):
+        client = FakeClient([FakeResponse(200, body)])
+        runner = travel.TravelRunner(FakeCtx(client), clock=lambda: self.now)
+        return runner.sync("a1", self.stale if prior is None else prior)
+
+    def test_traveling_clears_the_previous_failure_message(self):
+        """本轮查询成功 → 旧失败原因必须消失，换成描述当前行程的文案。"""
+        result = self._sync(status_body("traveling",
+                                       arrive_at=(self.now + 1800) * 1000,
+                                       location={"id": 1, "name": "京都"}))
+        self.assertTrue(result["ok"])
+        self.assertIsNone(result["skip"])
+        self.assertNotIn("daily limit", str(result["message"]))
+        self.assertIn("京都", result["message"])
+        self.assertIn("30 分钟", result["message"])
+
+    def test_traveling_without_arrival_time_still_gets_a_message(self):
+        """没有到达时间时也不能留空 —— 界面要显示一句人话，而不是空白。"""
+        result = self._sync(status_body("traveling"))
+        self.assertTrue(result["ok"])
+        self.assertTrue(str(result["message"]).strip())
+        self.assertNotIn("daily limit", str(result["message"]))
+
+    def test_daily_limit_replaces_the_stale_message(self):
+        result = self._sync(status_body("idle", daily_limit_reached=True))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["skip"], "daily-limit")
+        self.assertEqual(result["message"], "今日已派")
+        self.assertNotIn("daily limit reached", result["message"])
+
+    def test_idle_without_a_trip_says_so_instead_of_leaving_blank(self):
+        result = self._sync(status_body("idle"))
+        self.assertFalse(result["ok"])
+        self.assertTrue(str(result["message"]).strip())
+        self.assertNotIn("daily limit", str(result["message"]))
+
+    def test_unknown_state_reports_the_actual_state(self):
+        result = self._sync(status_body("nonsense"))
+        self.assertEqual(result["skip"], "status-error")
+        self.assertIn("nonsense", result["message"])
+
+    def test_failed_status_query_reports_this_rounds_error(self):
+        client = FakeClient([FakeResponse(200, {"code": 500, "message": "上游炸了"})])
+        runner = travel.TravelRunner(FakeCtx(client), clock=lambda: self.now)
+        result = runner.sync("a1", self.stale)
+        self.assertEqual(result["skip"], "status-error")
+        self.assertIn("上游炸了", result["message"])
+        self.assertNotIn("daily limit reached", result["message"])
+
+    def test_previous_message_never_survives_a_second_round(self):
+        """连跑两轮：第二轮的文案必须来自第二轮，不是第一轮。"""
+        first = travel.TravelRunner(
+            FakeCtx(FakeClient([FakeResponse(200, status_body("idle", daily_limit_reached=True))])),
+            clock=lambda: self.now).sync("a1", self.stale)
+        self.assertEqual(first["message"], "今日已派")
+
+        second = travel.TravelRunner(
+            FakeCtx(FakeClient([FakeResponse(200, status_body("traveling",
+                                                              location={"id": 1, "name": "大阪"}))])),
+            clock=lambda: self.now).sync("a1", first)
+        self.assertNotIn("今日已派", second["message"])
+
+    def test_trip_fields_are_preserved_across_rounds(self):
+        """recordId / arriveAt 是行程的客观属性，跨轮次必须保留 —— 清了就领不到奖。"""
+        prior = dict(self.stale, recordId="R-9", arriveAt=(self.now + 600) * 1000)
+        result = self._sync(status_body("traveling", record_id="R-9",
+                                        arrive_at=(self.now + 600) * 1000,
+                                        location={"id": 1, "name": "奈良"}), prior=prior)
+        self.assertEqual(result.get("recordId"), "R-9")
+
+
+class DepartMessageTests(unittest.TestCase):
+    """派发失败时的文案：必须能看出是失败，且尽量是中文。"""
+
+    def test_unknown_upstream_text_is_kept_for_diagnosis(self):
+        """认不出的英文文案要保留原文 —— 那是排查时唯一的线索。"""
+        self.assertIn("some brand new upstream error",
+                      travel._depart_text("some brand new upstream error"))
+
+    def test_known_phrases_are_translated_and_keep_the_original(self):
+        text = travel._depart_text("buddy not found")
+        self.assertIn("还没有领养猫猫", text)
+        self.assertIn("buddy not found", text)
+
+    def test_empty_text_gets_a_readable_fallback(self):
+        self.assertEqual(travel._depart_text(""), "上游未说明原因")
+        self.assertEqual(travel._depart_text(None), "上游未说明原因")
+
+    def test_left_minutes_rounds_up_and_clamps_at_zero(self):
+        now = 1_800_000_000
+        self.assertEqual(travel._left_minutes((now + 30) * 1000, now), 1)   # 剩 30 秒 → 1 分钟
+        self.assertEqual(travel._left_minutes((now + 60) * 1000, now), 1)
+        self.assertEqual(travel._left_minutes((now + 61) * 1000, now), 2)
+        self.assertEqual(travel._left_minutes((now - 10) * 1000, now), 0)   # 已到 → 0
+        self.assertEqual(travel._left_minutes(0, now), 0)
+        self.assertEqual(travel._left_minutes("garbage", now), 0)
+
+    def test_unclassifiable_depart_marks_failure_not_success(self):
+        """兜底分支必须是 ok=False —— 报成成功会让「今天已派」变成谎话。"""
+        cfg = ok({"enabled": True, "locations": [{"id": "L1", "name": "京都"}]})
+        dep = FakeResponse(200, {"code": 45001, "message": "totally new error"})
+        runner = travel.TravelRunner(FakeCtx(FakeClient([cfg, dep])),
+                                     clock=lambda: 1_800_000_000)
+        result = runner.depart("a1")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["skip"], "error")
+        self.assertIn("旅行派发失败", result["message"])
+        self.assertIn("totally new error", result["message"])
+
+
+class ErrorTextTests(unittest.TestCase):
+    """信封的文案可能在好几个地方 —— 只读顶层 `message` 会漏。
+
+    `upstream.envelope()` 在 HTTP >= 300 且 body 是 dict 时**原样返回**，
+    并不保证里面有 `message`。于是下面第 2~4 种形态会让分类器拿到空串，
+    把「今日已派完」判成失败：界面上刷出「旅行派发失败：daily limit reached」，
+    并且调度每轮都白打一次上游。
+    """
+
+    def test_top_level_message(self):
+        self.assertEqual(travel.error_text({"message": "x"}), "x")
+
+    def test_msg_alias(self):
+        self.assertEqual(travel.error_text({"msg": "x"}), "x")
+
+    def test_nested_under_data(self):
+        self.assertEqual(travel.error_text({"code": 1, "data": {"message": "x"}}), "x")
+
+    def test_error_key(self):
+        self.assertEqual(travel.error_text({"error": "x"}), "x")
+
+    def test_detail_key(self):
+        self.assertEqual(travel.error_text({"detail": "x"}), "x")
+
+    def test_doubly_nested(self):
+        self.assertEqual(travel.error_text({"detail": {"message": "x"}}), "x")
+
+    def test_missing_everywhere_is_empty_not_a_crash(self):
+        for env in ({}, None, [], "字符串", {"code": 500}, {"data": {"code": 1}}):
+            self.assertEqual(travel.error_text(env), "")
+
+    def test_blank_strings_do_not_win_over_real_text(self):
+        """空串/空白不能算「找到了」，否则会把后面的真文案挡住。"""
+        self.assertEqual(travel.error_text({"message": "   ", "error": "真原因"}), "真原因")
+
+    def test_message_of_also_digs_into_nested_shapes(self):
+        """`message_of` 走同一套挖掘逻辑。
+
+        它是全仓共用的「把上游原因取给人看」的入口，先前只读顶层
+        `message`/`msg`：文案在别处时调用方拿到的是自己那个兜底文案
+        （「领奖失败」之类），真正的原因被吞掉，排查时什么都看不到。
+        """
+        from admin import upstream
+        self.assertEqual(upstream.message_of({"error": "真原因"}), "真原因")
+        self.assertEqual(upstream.message_of({"data": {"message": "真原因"}}), "真原因")
+        self.assertEqual(upstream.message_of({"detail": "真原因"}), "真原因")
+        # 都找不到时仍然用调用方给的兜底文案
+        self.assertEqual(upstream.message_of({}, "领奖失败"), "领奖失败")
+        self.assertEqual(upstream.message_of(None, "领奖失败"), "领奖失败")
+
+
+class DailyLimitClassificationTests(unittest.TestCase):
+    """「今日已派完」必须被认出来 —— 漏判的代价是整天反复重试 + 假告警。
+
+    线上真实故障：6 个账号同时刷出「旅行派发失败：daily limit reached」。
+    根因是上游把文案放在 `data.message` 等位置时分类器拿到空串，
+    于是落到兜底分支，被记成失败。
+    """
+
+    def test_english_variants(self):
+        for text in ("daily limit reached", "Daily Limit Reached",
+                     "daily travel limit reached", "daily_limit_exceeded",
+                     "day limit reached", "limit reached"):
+            with self.subTest(text=text):
+                self.assertEqual(travel.classify_depart_error(0, text), "daily_limit")
+
+    def test_chinese_variants(self):
+        """上游是中文产品，本地化过的文案同样要认。"""
+        for text in ("已达今日旅行上限", "今日已派完", "今天次数已达上限，明天再来吧",
+                     "已达今日上限"):
+            with self.subTest(text=text):
+                self.assertEqual(travel.classify_depart_error(0, text), "daily_limit")
+
+    def test_rate_limit_is_still_not_daily_done(self):
+        """反向护栏：限流绝不能被当成「今日已派」。
+
+        这条比正向匹配更重要 —— 误判成当日结束会白白丢掉一整天的旅行积分，
+        而且当天再也不会重试。
+        """
+        for text in ("too many requests", "rate limit exceeded",
+                     "service unavailable", "internal error", ""):
+            with self.subTest(text=text):
+                self.assertNotEqual(travel.classify_depart_error(0, text), "daily_limit")
+
+    def test_http_429_alone_is_not_daily_done(self):
+        self.assertEqual(travel.classify_depart_error(429, "too many requests"), "other")
+
+    def test_already_traveling_wins_over_daily_limit(self):
+        """"正在旅行"更具体、更可操作，两者都出现时优先它。"""
+        self.assertEqual(
+            travel.classify_depart_error(0, "already traveling, daily limit reached"),
+            "already_traveling")
+
+    def _depart(self, body):
+        cfg = ok({"enabled": True, "locations": [{"id": "L1", "name": "京都"}]})
+        runner = travel.TravelRunner(FakeCtx(FakeClient([cfg, FakeResponse(200, body)])),
+                                     clock=lambda: 1_800_000_000)
+        return runner.depart("a1")
+
+    def test_nested_message_is_recognised_as_daily_done(self):
+        """回归：文案在 data.message 里时，先前会被判成失败。"""
+        result = self._depart({"code": 45001, "data": {"message": "daily limit reached"}})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["skip"], "daily-limit")
+        self.assertNotIn("派发失败", result["message"])
+
+    def test_error_key_is_recognised_as_daily_done(self):
+        result = self._depart({"error": "daily limit reached"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["skip"], "daily-limit")
+
+    def test_detail_key_is_recognised_as_daily_done(self):
+        result = self._depart({"detail": "daily limit reached"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["skip"], "daily-limit")
+
+    def test_daily_done_is_marked_claimed_so_it_stops_retrying(self):
+        """当日结束要落 `claimed`，否则调度每轮还会再打一次上游。"""
+        result = self._depart({"code": 45001, "data": {"message": "daily limit reached"}})
+        self.assertTrue(result["claimed"])
+        self.assertFalse(travel.is_retryable_skip(result["skip"]))
 
 
 if __name__ == "__main__":

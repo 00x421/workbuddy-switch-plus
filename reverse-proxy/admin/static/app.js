@@ -29,6 +29,9 @@ function showLogin() {
   csrf = ""; overview = null; $("workspace").hidden = true; $("login").hidden = false; $("boot").hidden = true;
   document.querySelectorAll("dialog[open]").forEach(d => d.close());
   setLoginMode("user");
+  // 登录页也要显示版本：报障往往发生在**登录之前**（比如登不上去）。
+  // 这里再渲染一次，是因为未登录时 session 接口也返回版本 —— 见 server.py。
+  renderVersion(sessionInfo || bootVersion);
 }
 /* 登录方式切换。三种凭据共用一个 /admin/api/login，服务端靠请求体里出现的是
    key / token / username 来分流。切面板时把非当前面板的输入框 disable 掉：
@@ -87,7 +90,7 @@ function goPage(next) {
   // 用户点进页面后会先盯着一张全 "—" 的空表等半分钟 —— 表现得像坏了。
   // 用户管理与服务设置也在这里拉：这两页不进 30 秒轮询 ——
   // 设置是低频操作，轮询只会白白重画表单，把管理员正在输入的内容冲掉。
-  if (next === "settings" && csrf) loadSettings();
+  if (next === "settings" && csrf) { loadSettings(); loadAlerts(); }
 }
 /* 运行时长。两个口径，都要显示：
  *   session = 本次进程起来多久（重启归零）
@@ -165,9 +168,9 @@ function render() {
     // 用 || 会让它退到默认值，用户就永远清不掉已填的地址。
     $("wb2api-base").value = overview.pool?.wb2api_base ?? ""; $("wb2api-key").value = overview.pool?.wb2api_key ?? "";
   }
-  const keyRow = k => `<tr><td><strong>${esc(k.name)}</strong></td><td><div class="secret-cell"><code data-secret="${esc(k.secret || k.hint)}" data-hidden="1">${esc(k.secret ? "•".repeat(12) : k.hint)}</code><button class="text-button reveal" data-reveal="${k.id}" title="显示 / 隐藏密钥" aria-label="显示或隐藏密钥">${ICON_EYE}</button></div></td><td class="muted mono">${esc(stamp(k.created * 1000))}</td><td>${groupTags(k.groups)}</td><td class="align-right"><div class="actions"><button class="danger" data-revoke="${k.id}">撤销</button></div></td></tr>`;
+  const keyRow = k => `<tr><td><strong>${esc(k.name)}</strong>${k.realm ? `<small class="cell-note">${k.realm === "cn" ? "仅国内版" : "仅国际版"}</small>` : ""}</td><td><div class="secret-cell"><code data-secret="${esc(k.secret || k.hint)}" data-hidden="1">${esc(k.secret ? "•".repeat(12) : k.hint)}</code><button class="text-button reveal" data-reveal="${k.id}" title="显示 / 隐藏密钥" aria-label="显示或隐藏密钥">${ICON_EYE}</button></div></td><td>${keyStateCell(k)}</td><td class="muted mono">${esc(stamp(k.created * 1000))}</td><td>${groupTags(k.groups)}</td><td>${keyLimitCell(k)}</td><td class="align-right"><div class="actions"><button data-edit-key="${esc(k.id)}">编辑</button><button class="danger" data-revoke="${k.id}">撤销</button></div></td></tr>`;
   $("keys-body").innerHTML = keys.map(keyRow).join("")
-    || '<tr><td colspan="5" class="history-empty">还没有密钥。</td></tr>';
+    || '<tr><td colspan="7" class="history-empty">还没有密钥。</td></tr>';
   const selected = $("model").value || overview.default_model || "deepseek-v4.1-flash";
   $("model").replaceChildren(...models.map(model => { const o = document.createElement("option"); o.value = o.textContent = model; return o; }));
   if (models.includes(selected)) $("model").value = selected;
@@ -323,8 +326,14 @@ function renderAccounts() {
   const rows = overview.accounts.filter(a => (!query || [a.name,a.nickname,a.uid].join(" ").toLowerCase().includes(query)) && (filter === "all" || a.pool_state === filter));
   $("accounts-body").innerHTML = rows.map(a => {
     const status = POOL_STATES[a.pool_state] || ["待查询", ""];
+    /* 企业版不限量账号的 remaining 是 null，与「还没查过积分」撞在一起。
+       靠 is_enterprise 区分：企业号显示「企业配额」而不是让人以为额度用光了。
+       注意别把 null 渲染成 0 —— 那是最容易被误读成「没额度了」的一种。 */
+    const enterprise = a.is_enterprise
+      ? `<span class="mini-enterprise" title="企业版账号：配额与企业组织共享">企业版</span>` : "";
     const credits = a.remaining === null || a.remaining === undefined ? "—" : Number(a.remaining).toLocaleString("zh-CN",{maximumFractionDigits:2});
-    return `<tr><td><div class="account-cell"><span class="account-icon">${esc(a.name.slice(0,1))}</span><div><strong>${esc(a.name)}${a.active ? '<span class="mini-active">手动 / 测试账号</span>' : ""}</strong><small>${esc(a.uid || a.nickname)}</small></div></div></td><td><span class="pill ${status[1]}">${status[0]}</span><small class="cell-note">${a.today_checked_in ? "今日已签到" : "今日未确认签到"}</small>${travelNote(a)}${activeNote(a)}${a.cooldown_until > Date.now()/1000 ? `<small class="cell-note">至 ${esc(stamp(a.cooldown_until*1000))}</small>` : ""}${upstreamNote(a)}</td><td><strong class="credit-number">${credits}</strong><small class="cell-note">${a.credits_updated ? esc(stamp(a.credits_updated*1000)) : "点击查询积分"}${a.credits_stale && a.credits_updated ? " · 待刷新" : ""}</small>${a.last_error ? `<small class="cell-note field-error">${esc(a.last_error)}</small>` : ""}</td><td class="mono">${esc(stamp(a.expires_at))}<small class="cell-note">${a.expired ? "已到期 · 调用时尝试刷新" : "支持自动刷新"}</small></td><td><div class="actions pool-actions">${a.enabled ? `<button data-action="status" data-id="${a.id}" title="查询积分与签到状态">查询积分</button><button data-action="checkin" data-id="${a.id}">签到</button><button data-action="travel" data-id="${a.id}" title="按状态机派一次猫猫旅行；已在旅途中会提示">派旅行</button><button data-action="travel-claim" data-id="${a.id}" title="回查官方状态，到点则领奖">领奖</button><button data-action="active" data-id="${a.id}" title="向上游发送一条 chat_request_send 事件，点亮 growth 连登">活跃</button><button data-action="refresh" data-id="${a.id}">刷新凭据</button>` : ""}${a.enabled && !a.active ? `<button data-action="activate" data-id="${a.id}">设为手动 / 测试</button>` : ""}<button data-action="rename" data-id="${a.id}">备注</button><button data-action="toggle" data-id="${a.id}">${a.enabled ? "暂停" : "恢复"}</button><button class="danger" data-action="delete" data-id="${a.id}">删除</button></div></td></tr>`;
+    const creditNote = a.is_enterprise ? "企业配额" : (a.credits_updated ? esc(stamp(a.credits_updated*1000)) : "点击查询积分");
+    return `<tr><td><div class="account-cell"><span class="account-icon">${esc(a.name.slice(0,1))}</span><div><strong>${esc(a.name)}${a.active ? '<span class="mini-active">手动 / 测试账号</span>' : ""}${enterprise}</strong><small>${esc(a.uid || a.nickname)}</small></div></div></td><td><span class="pill ${status[1]}">${status[0]}</span><small class="cell-note">${a.today_checked_in ? "今日已签到" : "今日未确认签到"}</small>${travelNote(a)}${activeNote(a)}${a.cooldown_until > Date.now()/1000 ? `<small class="cell-note">至 ${esc(stamp(a.cooldown_until*1000))}</small>` : ""}${upstreamNote(a)}</td><td><strong class="credit-number">${credits}</strong><small class="cell-note">${creditNote}${a.credits_stale && a.credits_updated ? " · 待刷新" : ""}</small>${a.last_error ? `<small class="cell-note field-error">${esc(a.last_error)}</small>` : ""}</td><td class="mono">${esc(stamp(a.expires_at))}<small class="cell-note">${a.expired ? "已到期 · 调用时尝试刷新" : "支持自动刷新"}</small></td><td><div class="actions pool-actions">${a.enabled ? `<button data-action="status" data-id="${a.id}" title="查询积分与签到状态">查询积分</button><button data-action="checkin" data-id="${a.id}">签到</button><button data-action="travel" data-id="${a.id}" title="按状态机派一次猫猫旅行；已在旅途中会提示">派旅行</button><button data-action="travel-claim" data-id="${a.id}" title="回查官方状态，到点则领奖">领奖</button><button data-action="active" data-id="${a.id}" title="向上游发送一条 chat_request_send 事件，点亮 growth 连登">活跃</button><button data-action="refresh" data-id="${a.id}">刷新凭据</button>` : ""}${a.enabled && !a.active ? `<button data-action="activate" data-id="${a.id}">设为手动 / 测试</button>` : ""}<button data-action="rename" data-id="${a.id}">备注</button><button data-action="toggle" data-id="${a.id}">${a.enabled ? "暂停" : "恢复"}</button><button class="danger" data-action="delete" data-id="${a.id}">删除</button></div></td></tr>`;
   }).join("") || (overview.accounts.length ? '<tr><td colspan="5" class="muted">没有符合筛选条件的账号。</td></tr>' : "");
 }
 /* ---------- 上游分组 ---------- */
@@ -336,6 +345,43 @@ function groupTags(ids) {
   if (!list.length) return '<span class="muted">不限</span>';
   const names = new Map((overview?.groups || []).map(g => [g.id, g.name]));
   return `<div class="tag-list">${list.map(id => `<code title="${esc(id)}">${esc(names.get(id) || id)}</code>`).join("")}</div>`;
+}
+
+/* 密钥状态。判据顺序与桌面端一致：停用 > 过期 > 配额用尽 > 可用。
+   「已过期」要算出来而不是只看 enabled —— 过期了的密钥 enabled 仍是 true，
+   光看那个字段会把一枚早就失效的密钥显示成「可用」。 */
+function keyStateCell(k) {
+  if (k.enabled === false) return '<span class="pill">已停用</span>';
+  if (k.expires_at && k.expires_at * 1000 < Date.now()) {
+    return `<span class="pill red">已过期</span><small class="cell-note mono">${esc(stamp(k.expires_at * 1000))}</small>`;
+  }
+  if (k.quota && k.used_tokens >= k.quota) return '<span class="pill amber">配额用尽</span>';
+  if (k.quota_credit && k.used_credit >= k.quota_credit) return '<span class="pill amber">积分用尽</span>';
+  const until = k.expires_at
+    ? `<small class="cell-note mono">至 ${esc(stamp(k.expires_at * 1000))}</small>`
+    : '<small class="cell-note">永不过期</small>';
+  return `<span class="pill green">可用</span>${until}`;
+}
+
+/* 额度与来源限制。已用 / 上限写成一行，0 显示成「不限」而不是「0」——
+   后者会让人以为额度是零、密钥不能用。 */
+function keyLimitCell(k) {
+  const fmt = v => Number(v || 0).toLocaleString("zh-CN", {maximumFractionDigits: 2});
+  const quota = k.quota ? `${fmt(k.quota)}` : "不限";
+  const credit = k.quota_credit ? `${fmt(k.quota_credit)}` : "不限";
+  const rows = [
+    `<div>Token ${fmt(k.used_tokens)} / ${quota}</div>`,
+    `<div class="muted">积分 ${fmt(k.used_credit)} / ${credit}</div>`,
+  ];
+  const ips = k.ip_allowlist || [];
+  if (ips.length) rows.push(`<div class="muted mono">IP ${esc(ips.join("、"))}</div>`);
+  if (k.max_ips) rows.push(`<div class="muted">最多 ${k.max_ips} 个 IP（已用 ${(k.ips || []).length}）</div>`);
+  const models = k.models || [];
+  if (models.length) {
+    const shown = models.slice(0, 3).map(m => esc(m)).join("、");
+    rows.push(`<div class="muted mono">模型 ${shown}${models.length > 3 ? ` +${models.length - 3}` : ""}</div>`);
+  }
+  return rows.join("");
 }
 
 function renderGroups() {
@@ -603,6 +649,14 @@ function renderLogs() {
   $("log-account-list").innerHTML = summary.length ? summary.map(a => `<div class="log-account"><span class="account-icon">${esc(a.name.slice(0, 1))}</span><div><strong>${esc(a.name)}</strong><small>${logNumber(a.count)} 次请求${a.failed ? ` · 失败 ${logNumber(a.failed)}` : ""}</small></div><div class="align-right"><b>${logCredit(a.credit)}</b><small>积分 · ${logNumber(a.tokens)} tokens</small></div></div>`).join("") : '<p class="history-empty">缓冲区内还没有请求记录，发起一次调用后再回来看。</p>';
 
   fillLogFilter($("log-account"), rows.map(r => [r.account_id || "", logAccountName(r)]));
+  /* 密钥筛选项：值用 key_id，文字用名字 —— 见 logRowsFiltered 里的理由。
+     名字取不到（密钥已删）时退回显示 id，让人至少能对上。 */
+  if ($("log-key")) {
+    fillLogFilter($("log-key"), rows.map(r => [
+      r.key_id || "",
+      logKeyName(r) || r.key_id || "—",
+    ]));
+  }
   fillLogFilter($("log-model"), rows.map(r => [r.model || "", r.model || "未知模型"]));
   // 分组筛选项从当前日志里真正出现过的分组生成（而不是全量分组清单）：
   // 列一个永远筛不出结果的分组，比不列它更让人困惑。
@@ -674,6 +728,37 @@ function logGroupOf(r) {
   };
 }
 
+/* ---------- 请求日志：是哪个密钥发起的 ---------- */
+
+/* 名字优先用日志里记下的 `key_name`，查不到才回落到 `overview.keys`。
+   为什么要有这个回落顺序：密钥是可删的，删掉之后 `overview.keys` 里
+   就找不到它了 —— 但那条历史请求当时确实是由某个名字的密钥发起的。
+   反过来，`key_name` 对**旧日志**（这个字段是后加的）不存在，
+   所以也要能回落到当下去查。
+   两边都拿不到时宁可显示密钥 id，也不能显示成「未知」——id 至少能对上人。 */
+function logKeyName(r) {
+  if (!r) return null;
+  if (r.key_name) return r.key_name;
+  if (!r.key_id) return null;
+  const key = (overview?.keys || []).find(k => k.id === r.key_id);
+  return (key && key.name) || r.key_id;
+}
+
+/* 密钥列。三种情形要能一眼分开，因为处置方向不同：
+     · 有名字       —— 正常情况
+     · 无密钥       —— 这次请求根本没走密钥（直连 / 健康检查）
+     · 密钥已删除   —— 当时有密钥，现在没了（key_name 还在，key_id 查不到） */
+function logKeyCell(r) {
+  const name = logKeyName(r);
+  if (!name) return '<span class="cell-note">—</span>';
+  const gone = r.key_id && !(overview?.keys || []).some(k => k.id === r.key_id);
+  const sub = gone ? "已删除" : (r.key_hint || "");
+  return `<span class="key-cell"><span class="key-name">${esc(name)}</span>`
+    + (sub ? `<small class="cell-note mono">${esc(sub)}</small>` : "")
+    + `</span>`;
+}
+
+
 function logGroupCell(r) {
   const g = logGroupOf(r);
   if (!g.ids.length) {
@@ -688,11 +773,17 @@ function logGroupCell(r) {
 
 function logRowsFiltered() {
   const account = $("log-account").value, model = $("log-model").value,
-        outcome = $("log-outcome").value, group = $("log-group").value;
+        outcome = $("log-outcome").value, group = $("log-group").value,
+        keyFilter = $("log-key") ? $("log-key").value : "all";
   return (requestLogs || []).filter(r => {
     if (account !== "all" && (r.account_id || "") !== account) return false;
     if (model !== "all" && (r.model || "") !== model) return false;
     if (outcome !== "all" && r.outcome !== outcome) return false;
+    /* 密钥筛选按 **key_id** 命中，不按名字。
+       名字是可以改的：改名之后按名字筛，历史记录会跟着新名字走，
+       而人想知道的是「这条请求当时是哪个密钥发的」——那是 id 的事实。
+       选项的显示文字用名字，值用 id，正是这个道理。 */
+    if (keyFilter !== "all" && (r.key_id || "") !== keyFilter) return false;
     if (group !== "all") {
       const g = logGroupOf(r);
       // 具体分组按 id 命中（多分组的行，绑了就该被筛出来）；
@@ -707,7 +798,7 @@ function logRowsFiltered() {
 }
 
 function logRowHtml(r) {
-  return `<tr><td class="mono muted">${esc(stamp(r.time * 1000))}</td><td>${esc(logAccountName(r))}${r.source === "test" ? '<span class="mini-active">测试</span>' : ""}<small class="cell-note mono">${r.account_id ? esc(r.account_id) : "—"}</small></td><td>${logGroupCell(r)}</td><td class="mono">${esc(r.model || "—")}</td><td><span class="pill ${LOG_TONES[r.outcome] || ""}">${esc(LOG_OUTCOMES[r.outcome] || r.outcome || "—")}</span><small class="cell-note">HTTP ${r.status ?? "—"}</small></td><td class="align-right mono">${logNumber(r.tokens)}</td><td class="align-right mono">${logCredit(r.credit)}</td><td class="align-right mono">${logNumber(r.duration_ms)} ms</td></tr>`;
+  return `<tr><td class="mono muted">${esc(stamp(r.time * 1000))}</td><td>${esc(logAccountName(r))}${r.source === "test" ? '<span class="mini-active">测试</span>' : ""}<small class="cell-note mono">${r.account_id ? esc(r.account_id) : "—"}</small></td><td>${logKeyCell(r)}</td><td>${logGroupCell(r)}</td><td class="mono">${esc(r.model || "—")}</td><td><span class="pill ${LOG_TONES[r.outcome] || ""}">${esc(LOG_OUTCOMES[r.outcome] || r.outcome || "—")}</span><small class="cell-note">HTTP ${r.status ?? "—"}</small></td><td class="align-right mono">${logNumber(r.tokens)}</td><td class="align-right mono">${logCredit(r.credit)}</td><td class="align-right mono">${logNumber(r.duration_ms)} ms</td></tr>`;
 }
 
 /** 按分组分节。组按「最新一条」排序，组内保持时间倒序 —— 顺序错了这页就没用。 */
@@ -729,7 +820,7 @@ function renderLogGroups(rows) {
   const sections = [...byBucket.values()]
     .map(s => ({...s, rows: s.rows.slice().sort((a, b) => (b.time || 0) - (a.time || 0))}))
     .sort((a, b) => (b.rows[0]?.time || 0) - (a.rows[0]?.time || 0));
-  box.innerHTML = sections.map(s => `<section class="log-group-section"><header><h3>${esc(s.label)} <span class="count-badge">${logNumber(s.rows.length)}</span></h3><small class="muted">${logNumber(s.tokens)} tokens · ${logCredit(s.credit)} 积分${s.label === LOG_GROUP_MULTI ? ' · 绑了多个分组的密钥，自成一类（不重复计入各分组）' : ""}</small></header><div class="table-wrap"><table><thead><tr><th>时间</th><th>账号</th><th>分组</th><th>模型</th><th>结果</th><th class="align-right">Token</th><th class="align-right">积分</th><th class="align-right">耗时</th></tr></thead><tbody>${s.rows.map(logRowHtml).join("")}</tbody></table></div></section>`).join("");
+  box.innerHTML = sections.map(s => `<section class="log-group-section"><header><h3>${esc(s.label)} <span class="count-badge">${logNumber(s.rows.length)}</span></h3><small class="muted">${logNumber(s.tokens)} tokens · ${logCredit(s.credit)} 积分${s.label === LOG_GROUP_MULTI ? ' · 绑了多个分组的密钥，自成一类（不重复计入各分组）' : ""}</small></header><div class="table-wrap"><table><thead><tr><th>时间</th><th>账号</th><th>密钥</th><th>分组</th><th>模型</th><th>结果</th><th class="align-right">Token</th><th class="align-right">积分</th><th class="align-right">耗时</th></tr></thead><tbody>${s.rows.map(logRowHtml).join("")}</tbody></table></div></section>`).join("");
 }
 
 let logView = "flat";
@@ -749,15 +840,15 @@ function applyLogFilter() {
   $("log-grouped-view").hidden = logView !== "grouped";
   if (logView === "flat") {
     $("logs-body").innerHTML = rows.map(logRowHtml).join("")
-      || '<tr><td colspan="8" class="history-empty">没有符合筛选条件的记录。</td></tr>';
+      || '<tr><td colspan="9" class="history-empty">没有符合筛选条件的记录。</td></tr>';
   } else {
     renderLogGroups(rows);
   }
 }
 
-["log-account", "log-model", "log-outcome", "log-group"].forEach(id => { if ($(id)) $(id).addEventListener("change", applyLogFilter); });
+["log-account", "log-key", "log-model", "log-outcome", "log-group"].forEach(id => { if ($(id)) $(id).addEventListener("change", applyLogFilter); });
 $("log-clear-filter").addEventListener("click", () => {
-  $("log-account").value = $("log-model").value = $("log-outcome").value = $("log-group").value = "all";
+  ["log-account", "log-key", "log-model", "log-outcome", "log-group"].forEach(id => { if ($(id)) $(id).value = "all"; });
   applyLogFilter();
 });
 
@@ -809,7 +900,7 @@ async function refresh() {
   catch (e) { $("load-error").textContent = e.message; $("load-error").hidden = false; throw e; }
   finally { $("refresh").disabled = false; }
 }
-async function enter() { $("boot").hidden = true; $("login").hidden = true; $("workspace").hidden = false; goPage(location.hash.slice(1)); await refresh(); }
+async function enter() { $("boot").hidden = true; $("login").hidden = true; $("workspace").hidden = false; renderVersion(sessionInfo || bootVersion); goPage(location.hash.slice(1)); await refresh(); }
 document.querySelectorAll("[data-login-mode]").forEach(b => b.addEventListener("click", () => setLoginMode(b.dataset.loginMode)));
 $("login-form").addEventListener("submit", async e => {
   e.preventDefault(); const button = e.submitter || $("login-form").querySelector('button[type="submit"]'); button.disabled = true; $("login-error").textContent = "";
@@ -966,20 +1057,129 @@ function onKeyTableClick(e) {
     eye.innerHTML = hidden ? ICON_EYE_OFF : ICON_EYE;
     return;
   }
-  const b = e.target.closest("[data-revoke]"); if (!b) return; const k = overview.keys.find(x => x.id === b.dataset.revoke); confirmAction("撤销客户端密钥？", `使用「${k.name}」的客户端将无法发起新请求。此操作不可撤销。`, () => api("keys/" + k.id, {method:"DELETE"}));
+  const b = e.target.closest("[data-revoke]");
+  if (b) { const k = overview.keys.find(x => x.id === b.dataset.revoke); confirmAction("撤销客户端密钥？", `使用「${k.name}」的客户端将无法发起新请求。此操作不可撤销。`, () => api("keys/" + encodeURIComponent(k.id), {method:"DELETE"})); return; }
+  // 编辑：不换密钥明文，只改策略字段。与「撤销后重建」的区别正在于此 ——
+  // 重建会换掉明文，所有已配置的客户端都得跟着改。
+  const ed = e.target.closest("[data-edit-key]");
+  if (ed) { const k = overview.keys.find(x => x.id === ed.dataset.editKey); if (k) openKeyDialog(k); }
 }
 // 两张表共用同一套行为（管理员密钥 / 用户自助密钥），overview.keys 里两者都在。
 $("keys-body").addEventListener("click", onKeyTableClick);
-/* 创建密钥弹窗里的分组勾选。每次打开重填一次，避免勾选状态跨次残留。 */
-function fillKeyGroups() {
+
+/* ── 密钥弹窗：创建与编辑共用一套表单 ───────────────────────────────────
+   编辑能力是后补的：先前这里只有「创建密钥」，其余字段（IP 白名单 / 模型
+   白名单 / 配额 / 有效期 / 版本归属 / 停用）创建之后**再也改不了**，
+   只能撤销重签 —— 而撤销会换掉密钥明文，所有已配置的客户端都得跟着改。
+   现在与桌面端面板对齐，同一套字段、同一套语义。
+
+   分组勾选每次打开重填，避免勾选状态跨次残留。 */
+function fillKeyGroups(selected) {
   const groups = overview?.groups || [];
+  const on = new Set(selected || []);
   $("key-groups").innerHTML = groups.length
-    ? groups.map(g => `<label><input type="checkbox" value="${esc(g.id)}"><span>${esc(g.name)}</span><small class="cell-note">${g.account_count} 个账号</small></label>`).join("")
+    ? groups.map(g => `<label><input type="checkbox" value="${esc(g.id)}"${on.has(g.id) ? " checked" : ""}>`
+        + `<span>${esc(g.name)}</span>`
+        // 停用 / 空组要标出来：绑上去以后密钥会拿不到账号，事后很难查。
+        + (!g.enabled ? '<span class="pill">已停用</span>' : (g.empty ? '<span class="pill amber">空组</span>' : ""))
+        + `<small class="cell-note">${g.account_count} 个账号</small></label>`).join("")
     : '<p class="check-list-empty">还没有分组。先到「上游分组」建一个，就能把密钥限制在组内账号上。</p>';
 }
-$("add-key").addEventListener("click", () => { $("key-form").hidden = false; $("created-key").hidden = true; fillKeyGroups(); $("key-dialog").showModal(); });
-$("key-dialog").addEventListener("close", () => { $("key-form").reset(); $("new-key-value").textContent = ""; $("key-error").textContent = ""; $("key-groups").innerHTML = ""; });
-$("key-form").addEventListener("submit", async e => { e.preventDefault(); e.submitter.disabled = true; try { const d = await api("keys", {method:"POST",body:{name:$("key-name").value, groups:[...$("key-groups").querySelectorAll("input[type=checkbox]:checked")].map(x => x.value)}}); $("key-form").hidden = true; $("created-key").hidden = false; $("new-key-value").textContent = d.key; await refresh(); } catch (err) { $("key-error").textContent = err.message; } finally { e.submitter.disabled = false; } });
+
+/** 每行一个模型名；逗号也当分隔符，方便从别处粘贴。 */
+function splitLines(value) {
+  return String(value || "").split(/[\n,]/).map(x => x.trim()).filter(Boolean);
+}
+
+/** 打开弹窗。`key` 为 null 时是创建，否则是编辑。 */
+function openKeyDialog(key) {
+  const editing = Boolean(key);
+  $("key-dialog-eyebrow").textContent = editing ? "EDIT API KEY" : "NEW API KEY";
+  $("key-dialog-title").textContent = editing ? "编辑密钥" : "创建客户端密钥";
+  $("key-submit").textContent = editing ? "保存" : "创建密钥";
+  $("key-id").value = editing ? key.id : "";
+  $("key-name").value = editing ? key.name : "";
+  $("key-realm").value = editing ? (key.realm || "") : "";
+  $("key-ip-allowlist").value = editing ? (key.ip_allowlist || []).join("\n") : "";
+  $("key-models").value = editing ? (key.models || []).join("\n") : "";
+  $("key-max-ips").value = editing ? (key.max_ips ?? 0) : 0;
+  // 编辑时不预填剩余天数：`expires_at` 是绝对时间戳，换算成天数会因取整
+  // 而漂移，用户一保存就悄悄改了到期时刻。0 表示「不动」，由服务端保留原值。
+  $("key-expires-days").value = 0;
+  $("key-quota").value = editing ? (key.quota ?? 0) : 0;
+  $("key-quota-credit").value = editing ? (key.quota_credit ?? 0) : 0;
+  $("key-enabled").checked = editing ? key.enabled !== false : true;
+  $("key-enabled-row").hidden = !editing;
+  $("key-models-hint").textContent = "";
+  $("key-form").hidden = false;
+  $("created-key").hidden = true;
+  $("key-error").textContent = "";
+  fillKeyGroups(editing ? key.groups : []);
+  $("key-dialog").showModal();
+}
+
+$("add-key").addEventListener("click", () => openKeyDialog(null));
+
+$("key-dialog").addEventListener("close", () => {
+  $("key-form").reset();
+  $("new-key-value").textContent = "";
+  $("key-error").textContent = "";
+  $("key-groups").innerHTML = "";
+  $("key-id").value = "";
+  $("key-enabled-row").hidden = true;
+});
+
+/* 模型白名单失焦时校验拼写。服务端拿不到清单就不判 —— 假警报比不提示更糟。 */
+$("key-models").addEventListener("blur", async () => {
+  const names = splitLines($("key-models").value);
+  if (!names.length) { $("key-models-hint").textContent = ""; return; }
+  try {
+    const d = await api("keys/check-models", {method:"POST", body:{models: names}});
+    const unknown = d.unknown || [];
+    $("key-models-hint").textContent = unknown.length ? `无法识别：${unknown.join("、")}` : "";
+  } catch { $("key-models-hint").textContent = ""; }
+});
+
+$("key-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const button = $("key-submit");
+  button.disabled = true;
+  const id = $("key-id").value;
+  const body = {
+    name: $("key-name").value,
+    realm: $("key-realm").value,
+    ip_allowlist: splitLines($("key-ip-allowlist").value),
+    models: splitLines($("key-models").value),
+    max_ips: Number($("key-max-ips").value) || 0,
+    quota: Number($("key-quota").value) || 0,
+    quota_credit: Number($("key-quota-credit").value) || 0,
+    // 空数组是「不限制」的有效取值，必须显式带上 —— 不传的话服务端按
+    // 「请求里没有这个字段」处理，编辑时就会「改了别的字段，分组被悄悄清空」。
+    groups: [...$("key-groups").querySelectorAll("input[type=checkbox]:checked")].map(x => x.value),
+  };
+  // 有效期只在填了正数时才提交：不填 = 不动现有到期时间。
+  const days = Number($("key-expires-days").value);
+  if (days > 0) body.expires_at = Math.floor(Date.now() / 1000) + Math.round(days * 86400);
+
+  try {
+    if (id) {
+      body.enabled = $("key-enabled").checked;
+      await api("keys/" + encodeURIComponent(id), {method:"PATCH", body});
+      toast("密钥已更新");
+      $("key-dialog").close();
+    } else {
+      const d = await api("keys", {method:"POST", body});
+      $("key-form").hidden = true;
+      $("created-key").hidden = false;
+      $("new-key-value").textContent = d.key;
+    }
+    await refresh();
+  } catch (err) {
+    $("key-error").textContent = err.message;
+  } finally {
+    button.disabled = false;
+  }
+});
 async function copy(value) { try { await navigator.clipboard.writeText(value); toast("已复制"); } catch { toast("无法自动复制，请手动选择文本复制"); } }
 $("copy-key").addEventListener("click", () => copy($("new-key-value").textContent));
 document.querySelectorAll("[data-copy]").forEach(b => b.addEventListener("click", () => copy(b.dataset.copy)));
@@ -999,7 +1199,7 @@ $("test-form").addEventListener("submit", async e => {
    只剩一种方式时连分段控件一起收起来——一格孤零零的切换按钮比没有更迷惑。 */
 async function applyLoginOptions() {
   let options;
-  try { options = await api("login-options"); } catch { return; }
+  try { options = await api("login-options"); } catch { return null; }
   const usable = {user: true, key: options.legacy_key !== false, token: options.tokens !== false};
   let visible = 0;
   document.querySelectorAll("[data-login-mode]").forEach(b => {
@@ -1012,6 +1212,9 @@ async function applyLoginOptions() {
     bar.hidden = visible < 2;
     bar.style.gridTemplateColumns = `repeat(${Math.max(1, visible)}, minmax(0, 1fr))`;
   }
+  /* 把原始响应回传出去：启动流程要拿它的 version 字段显示版本号。
+     这是**唯一**保证未登录也能访问的接口，所以版本放它这里。 */
+  return options;
 }
 
 /* ── 充值与兑换码 ─────────────────────────────────────────────────
@@ -1027,7 +1230,26 @@ function fmtCredit(n) {
 }
 
 
-(async () => { await applyLoginOptions(); try { const s = await api("session"); csrf = s.csrf; await enter(); } catch (e) { if (!csrf) showLogin(); } })();
+/* 启动探针。未登录时也会先问一次 session —— 为的是拿到版本号。
+ *
+ * 版本从 `/admin/api/login-options` 取，**不是** `session`：
+ * 实测 `session` 未登录时返回 401，挂在它上面会让登录页永远没有版本 ——
+ * 而"登不上去"恰恰是最需要版本的场景。`login-options` 才是保证未登录可访问的那个。
+ *
+ * 请求失败（服务没起来）也要把登录页放出来，而不是卡在 boot 屏。 */
+let bootVersion = null;
+(async () => {
+  /* applyLoginOptions 内部已经请求了 login-options 并把结果缓存下来，
+     这里直接复用，不重复发一次。 */
+  const options = await applyLoginOptions();
+  bootVersion = options || null;
+  renderVersion(bootVersion);
+  try {
+    const s = await api("session");
+    if (s && s.csrf) { csrf = s.csrf; sessionInfo = s; await enter(); return; }
+  } catch { /* 未登录：正常落到登录页 */ }
+  showLogin();
+})();
 
 /* ══════════════════════════════════════════════════════════════════
    用户管理（终端用户 / members）
@@ -1069,7 +1291,36 @@ async function loadSession() {
   if (sessionInfo !== null) return sessionInfo;
   try { sessionInfo = await api("session"); }
   catch { sessionInfo = {}; }   // 拿不到就不做前端阉割，交给服务端判定
+  renderVersion(sessionInfo);
   return sessionInfo;
+}
+
+
+/* 反代服务版本号。
+ *
+ * 显示在哪里、为什么要显示：
+ *   这个服务可以**单独部署**（只换服务器上的 exe，桌面端不动），所以
+ *   「服务器上跑的是哪个版本」是一个会被反复问到、且无法从别处推断的事实。
+ *   写进界面是为了让用户报障时能直接念出版本号，而不是靠"我传的哪个包"猜。
+ *
+ * 拿不到时显示 `v—` 而不是隐藏：**看不见版本**和**版本是 dev** 是两件事，
+ * 前者说明请求失败了，后者说明跑的是源码。混在一起会让排查的人以为
+ * 服务正常但没版本。
+ */
+function renderVersion(info) {
+  const v = info && info.version;
+  const text = v ? `v${v}` : "v—";
+  for (const id of ["sidebar-version", "login-version"]) {
+    const el = $(id);
+    if (el) el.textContent = text;
+  }
+  /* dev 模式（源码直跑）要能一眼看出来：那个版本号不对应任何 Release，
+     拿它去 Releases 里找会白找。 */
+  const dev = !!(info && info.dev);
+  for (const id of ["sidebar-version", "login-version"]) {
+    const el = $(id);
+    if (el) el.classList.toggle("is-dev", dev);
+  }
 }
 
 
@@ -1153,6 +1404,135 @@ $("set-profile-form").addEventListener("submit", event => {
   patchSettings({
     site_name: $("set-site-name").value.trim(),
   }, "服务设置已保存。", $("set-profile-submit"));
+});
+
+
+/* ── 告警通知 ───────────────────────────────────────────────────────────
+   只发给管理员自己（积分/冻结/封禁），不涉及任何终端用户。
+   口令走同一条 PUT 提交：留空 = 不修改，避免「回显掩码把口令抹掉」。 */
+
+async function loadAlerts() {
+  try {
+    renderAlerts(await api("alerts"));
+  } catch (error) {
+    settingsFeedback("读取告警设置失败：" + error.message, false);
+  }
+}
+
+/* 告警表单字段表 —— 一处定义，读和写共用。
+   为什么要抽出来：原来 renderAlerts 和 alertsPayload 各自硬编码一遍字段名，
+   加一个开关就要记得改两个地方；漏改一个的症状是「界面能勾、保存后不生效」，
+   而这类问题在服务端几乎不可能自查。表驱动之后加字段只改这里。 */
+const ALERT_FLAGS = [
+  ["notify_on_banned", "alerts-on-banned"],
+  ["notify_on_frozen", "alerts-on-frozen"],
+  ["notify_on_upstream_disabled", "alerts-on-upstream-disabled"],
+  ["notify_on_refresh_failed", "alerts-on-refresh-failed"],
+  ["notify_on_credits", "alerts-on-credits"],
+  ["notify_on_quota", "alerts-on-quota"],
+  ["notify_on_key_rejected", "alerts-on-key-rejected"],
+  ["notify_on_pool_empty", "alerts-on-pool-empty"],
+  ["notify_on_pool_thin", "alerts-on-pool-thin"],
+  ["notify_on_stale", "alerts-on-stale"],
+];
+
+const ALERT_NUMBERS = [
+  ["credits_threshold", "alerts-threshold", 100],
+  ["quota_percent", "alerts-quota-percent", 90],
+  ["pool_min_available", "alerts-pool-min", 1],
+  ["stale_minutes", "alerts-stale-minutes", 120],
+  ["key_reject_threshold", "alerts-key-rejects", 5],
+];
+
+function renderAlerts(a) {
+  $("alerts-enabled").checked = !!a.enabled;
+  $("alerts-to").value = a.to || "";
+  for (const [field, id] of ALERT_FLAGS) {
+    const el = $(id);
+    if (el) el.checked = !!a[field];
+  }
+  for (const [field, id, fallback] of ALERT_NUMBERS) {
+    const el = $(id);
+    if (el) el.value = a[field] ?? fallback;
+  }
+  $("alerts-host").value = a.host || "";
+  $("alerts-port").value = a.port || 465;
+  $("alerts-tls").value = a.tls || "ssl";
+  $("alerts-username").value = a.username || "";
+  $("alerts-sender").value = a.sender || "";
+  $("alerts-quiet-from").value = a.quiet_from ?? "";
+  $("alerts-quiet-to").value = a.quiet_to ?? "";
+  // 口令永不回显：只提示「已设置」，输入框保持空。
+  const pw = $("alerts-password");
+  pw.value = "";
+  pw.placeholder = a.password_set ? "已设置，留空表示不修改" : "留空表示不修改";
+}
+
+function alertsPayload() {
+  const quietFrom = $("alerts-quiet-from").value.trim();
+  const quietTo = $("alerts-quiet-to").value.trim();
+  const patch = {
+    enabled: $("alerts-enabled").checked,
+    to: $("alerts-to").value.trim(),
+    host: $("alerts-host").value.trim(),
+    port: Number($("alerts-port").value || 465),
+    tls: $("alerts-tls").value,
+    username: $("alerts-username").value.trim(),
+    sender: $("alerts-sender").value.trim(),
+    quiet_from: quietFrom === "" ? "" : Number(quietFrom),
+    quiet_to: quietTo === "" ? "" : Number(quietTo),
+  };
+  for (const [field, id] of ALERT_FLAGS) {
+    const el = $(id);
+    if (el) patch[field] = el.checked;
+  }
+  for (const [field, id, fallback] of ALERT_NUMBERS) {
+    const el = $(id);
+    if (el) patch[field] = Number(el.value || fallback);
+  }
+  // 口令只在真的填了才提交 —— 空串会把已存的口令覆盖掉。
+  const password = $("alerts-password").value;
+  if (password) patch.password = password;
+  return patch;
+}
+
+$("set-alerts-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const button = $("set-alerts-submit");
+  button.disabled = true;
+  button.dataset.label = button.textContent;
+  button.textContent = "保存中…";
+  try {
+    renderAlerts(await api("alerts", {method: "PUT", body: alertsPayload()}));
+    settingsFeedback("告警设置已保存。", true);
+  } catch (error) {
+    settingsFeedback(error.message, false);
+  } finally {
+    button.disabled = false;
+    button.textContent = button.dataset.label || "保存";
+  }
+});
+
+$("alerts-test").addEventListener("click", async () => {
+  const button = $("alerts-test");
+  const note = $("alerts-note");
+  button.disabled = true;
+  button.dataset.label = button.textContent;
+  button.textContent = "发送中…";
+  note.hidden = true;
+  try {
+    // 先落盘再测：否则「刚填的 SMTP」还没保存，测试用的还是旧配置。
+    renderAlerts(await api("alerts", {method: "PUT", body: alertsPayload()}));
+    const result = await api("alerts/test", {method: "POST"});
+    note.textContent = result.message || "测试邮件已发送。";
+    note.hidden = false;
+  } catch (error) {
+    note.textContent = "测试失败：" + error.message;
+    note.hidden = false;
+  } finally {
+    button.disabled = false;
+    button.textContent = button.dataset.label || "发送测试邮件";
+  }
 });
 
 

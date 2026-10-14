@@ -19,11 +19,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from core import converter
+from . import alerts
 from . import assets
 from . import egress
 from . import groups
 from . import keysvc
 from . import settings_store
+from . import version as _version
 from . import keyexport
 from . import usage
 from .browser_login import BrowserLogin
@@ -200,9 +202,15 @@ class Store:
             try:
                 doc = json.loads(self.file_for(item).read_text(encoding="utf-8"))
                 expiry = doc["auth"].get("expiresAt", 0)
-                row.update({"nickname": str(doc["account"].get("nickname") or ""), "uid": str(doc["account"].get("uid") or ""), "expires_at": expiry, "expired": expiry < time.time() * 1000, "refresh_available": bool(doc["auth"].get("refreshToken")), "status": "ready"})
+                account = doc["account"]
+                # 企业版标记：企业账号的配额不走个人版资源接口，界面要能看出来。
+                # `enterpriseId` 由浏览器登录链路与导入链路写入，个人账号为空。
+                enterprise_id = str(account.get("enterpriseId") or account.get("enterprise_id") or "")
+                row.update({"nickname": str(account.get("nickname") or ""), "uid": str(account.get("uid") or ""), "expires_at": expiry, "expired": expiry < time.time() * 1000, "refresh_available": bool(doc["auth"].get("refreshToken")), "status": "ready",
+                            "is_enterprise": bool(enterprise_id), "enterprise_id": enterprise_id})
             except (ValueError, OSError, KeyError):
-                row.update({"status": "invalid", "expired": True, "expires_at": 0, "refresh_available": False})
+                row.update({"status": "invalid", "expired": True, "expires_at": 0, "refresh_available": False,
+                            "is_enterprise": False, "enterprise_id": ""})
             result.append(row)
         return result
 
@@ -646,16 +654,27 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
     async def session(req: Request):
         user = security.current_user(req)
         return {"csrf": security.session_csrf(req), "username": user["username"],
-                "role": user["role"], "via": user.get("via")}
+                "role": user["role"], "via": user.get("via"),
+                # 版本号也跟着会话发一份（登录后前端会读这个接口）。
+                "version": _version.version(),
+                "dev": _version.is_dev()}
 
     @app.get("/admin/api/login-options")
     async def login_options():
         """登录页能摆哪些入口——**不需要登录**，登录页本身要据此渲染。
 
         只暴露「这个入口在当前部署下有没有用」，不含任何凭据、也不透露用户名。
+
+        版本号放在这里，是因为**这个接口是唯一保证未登录也能访问的**。
+        原先想挂在 `/admin/api/session` 上，实测它未登录时返回 401 ——
+        那样登录页永远拿不到版本，而"登不上去"恰恰是最需要版本的场景。
+
+        版本号不是敏感信息：它只说明"这是哪个构建"，不透露任何配置或凭据。
         """
         return {"legacy_key": security.legacy_key_enabled(),
-                "tokens": security.has_tokens()}
+                "tokens": security.has_tokens(),
+                "version": _version.version(),
+                "dev": _version.is_dev()}
 
     @app.get("/admin/api/me")
     async def me(req: Request):
@@ -1763,6 +1782,65 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
         security.audit(actor, "update_settings", "",
                        "字段=" + (fields or "(空)") + "；来源 " + client_ip(req))
         return saved
+
+
+    # ── 服务设置结束 ──────────────────────────────────────────────
+
+    # 端点：GET/PUT /admin/api/alerts —— 管理员告警通知。
+    #
+    # 只发信给管理员自己（积分/冻结/封禁），**不是用户系统**：
+    # 没有注册、没有找回密码、没有验证码、没有面向终端用户的收件人。
+
+    @app.get("/admin/api/alerts")
+    async def get_alerts(req: Request):
+        viewer(req)   # 只读角色也能看配置（口令只回掩码）
+        return alerts.public_view(alerts.load(store))
+
+    @app.put("/admin/api/alerts")
+    async def put_alerts(req: Request):
+        # 改 SMTP 口令 = 改服务的凭据，与 /admin/api/settings 同档，
+        # 用 session_admin 拒 wbt_ 令牌身份。
+        actor = session_admin(req)
+        body = await payload(req)
+        patch = alerts.normalize(body)
+        if patch:
+            with store.lock:
+                current = store.data.get(alerts.SETTINGS_KEY)
+                if not isinstance(current, dict):
+                    current = {}
+                current.update(patch)
+                store.data[alerts.SETTINGS_KEY] = current
+                store.save()
+        # 审计绝不记录口令：只记「改了哪些键」。
+        fields = "、".join(sorted(str(k) for k in body.keys()))
+        security.audit(actor, "update_alerts", "",
+                       "字段=" + (fields or "(空)") + "；来源 " + client_ip(req))
+        return alerts.public_view(alerts.load(store))
+
+    @app.post("/admin/api/alerts/test")
+    async def test_alerts(req: Request):
+        """发一封测试邮件，验证 SMTP 配置真的能通。
+
+        这是配置类功能唯一可靠的自证方式 —— 否则管理员只能等下一次真告警
+        才知道「原来没配通」，而那时候问题已经发生了。
+        """
+        session_admin(req)
+        cfg = alerts.load(store)
+        missing = [label for key, label in (("host", "SMTP 服务器"), ("to", "收件地址"))
+                   if not cfg.get(key)]
+        if missing:
+            raise HTTPException(400, "请先填写：" + "、".join(missing))
+        message = alerts.build_message(cfg, [{
+            "kind": "test", "title": "测试邮件",
+            "lines": ["这是一封测试邮件，收到即表示告警通道已配通。"],
+        }])
+        try:
+            await asyncio.to_thread(alerts.send, cfg, message)
+        except Exception as exc:  # noqa: BLE001
+            # 把真实原因透给管理员：SMTP 报错文案（认证失败/连不上）本身就是
+            # 排查所需的信息，包成「发送失败」等于让人去猜。
+            raise HTTPException(400, f"发送失败：{type(exc).__name__}: {exc}")
+        return {"ok": True, "message": f"测试邮件已发送至 {cfg.get('to')}"}
 
 
     # ── 服务设置结束 ──────────────────────────────────────────────

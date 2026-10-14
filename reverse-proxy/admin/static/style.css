@@ -215,6 +215,19 @@ label .muted { font-weight: 400; }
   cursor: pointer;
 }
 
+/* 弹窗里的两列小字段（最大 IP 数 / 有效期 / Token 额度 / 积分额度）。
+   窄屏退成一列：这些是数字输入，挤在手机宽度上会连标签都折行。 */
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+}
+.field-grid > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.field-grid label { margin: 0; }
+@media (max-width: 560px) {
+  .field-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* 勾选清单：密钥挑分组、分组挑成员都用它。
    高度封顶并自带滚动，成员多的时候不至于把弹窗撑出屏幕。 */
 .check-list {
@@ -396,6 +409,37 @@ input.switch {
 }
 .nav-item.selected span { color: var(--primary); }
 
+/* 开源仓库入口。三处共用（登录页脚 / 侧边栏底部 / 主区页脚），
+   所以只定一个 .repo-link，不各写各的。
+   颜色用 inherit：它同时出现在浅色页脚和深色侧边栏里，写死颜色必有一处看不清。 */
+.repo-link {
+  color: inherit; text-decoration: none;
+  display: inline-flex; align-items: center; gap: 4px;
+  opacity: .72; transition: opacity .15s, color .15s;
+}
+.repo-link:hover { opacity: 1; color: var(--accent, #6ea8fe); text-decoration: underline; }
+.repo-link:focus-visible { outline: 2px solid var(--accent, #6ea8fe); outline-offset: 2px; border-radius: 3px; }
+
+.sidebar-bottom .repo-link {
+  display: flex; justify-content: space-between; align-items: center;
+  width: 100%; margin: -4px 0 10px; padding: 9px 11px;
+  border: 1px solid var(--border); border-radius: 8px; font-size: 12px;
+}
+
+.main-footer .repo-link { margin-left: auto; font-size: 11px; letter-spacing: .04em; }
+
+/* 服务版本号。旁边的 .status-dot 说的是"连没连上"，这个是"连上的是哪个版本" ——
+   两件事，所以要能分开读，不能糊成一个灰色小字。
+   is-dev 用琥珀色标出来：那个版本号不对应任何 Release，拿去找会白找。 */
+.svc-version {
+  font-family: Consolas, monospace; font-weight: 600;
+  font-size: 10.5px; letter-spacing: .02em;
+  color: var(--ink-dim); padding: 1px 5px;
+  border: 1px solid var(--border); border-radius: 4px;
+}
+.svc-version.is-dev { color: var(--amber, #e0a044); border-color: rgba(224, 160, 68, .38); }
+.login-foot .svc-version { font-size: 10px; }
+
 .sidebar-bottom {
   margin-top: auto; padding: 16px 10px 0;
   border-top: 1px solid var(--border);
@@ -541,6 +585,15 @@ main { padding: 28px 34px 40px; flex: 1; min-width: 0; }
   border-radius: 999px;
   background: rgba(0, 188, 125, .16); color: #5ff0b8;
   font-size: 10px; font-weight: 600;
+}
+
+/* 企业版徽标。与 mini-active 同构但换色：两个徽标可能并排出现
+   （企业号同时被设为手动账号），同色会看成同一个标签。 */
+.mini-enterprise {
+  display: inline-block; margin-left: 8px; padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(120, 140, 255, .18); color: #a9b6ff;
+  font-size: 10px; font-weight: 600; cursor: help;
 }
 
 /* ---------- 统计卡 ---------- */
@@ -1281,6 +1334,27 @@ details textarea { margin-top: 8px; }
   font-size: 12px; color: var(--ink);
 }
 .log-group-cell small { margin-left: 5px; }
+
+/* 明细表里的密钥单元格。名字在上、脱敏片段在下，两行共用一个窄列。
+   名字可能很长（用户自己起的），所以跟分组单元格同一个套路：
+   溢出省略 + 完整值放 title，不撑破表格。 */
+.key-cell {
+  display: inline-flex; flex-direction: column; max-width: 170px;
+  overflow: hidden; vertical-align: bottom; line-height: 1.25;
+}
+.key-cell .key-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; color: var(--ink);
+}
+.key-cell .cell-note { font-size: 10.5px; }
+
+/* 告警类型分组里的小标题：把 10 个开关分成三段，否则是一坨。
+   用 span 而不是 label —— 它不是可点的控件，混进 label 会被误以为是选项。 */
+.alert-kinds span.cell-note {
+  display: block; margin: 10px 0 2px; font-size: 11px;
+  color: var(--muted); letter-spacing: .04em;
+}
+.alert-kinds span.cell-note:first-child { margin-top: 0; }
 
 /* 分组展示：每组一节，各自一张表。 */
 .log-groups { display: flex; flex-direction: column; gap: 18px; }

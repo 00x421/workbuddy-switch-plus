@@ -517,5 +517,154 @@ class GroupsEgressHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("create_egress_line", actions)
 
 
+class KeyEditingTests(unittest.IsolatedAsyncioTestCase):
+    """编辑密钥：网页端与桌面端共用同一套字段，改一个不能动到别的。
+
+    `PATCH /admin/api/keys/{kid}` 是**浅合并**：只更新请求体里出现过的键。
+    这个语义下单子测试要能覆盖的失败模式是「改了 A，B 被悄悄清空」——
+    前端少发一个键、或后端把「没传」当成「传了空」，都会静默损坏数据，
+    而响应照样是 200，界面照样显示保存成功。
+
+    所以下面每条都走**真 HTTP + 真回读**：只断言响应码是证明不了这件事的。
+    """
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        auth = root / "auth"
+        auth.mkdir()
+        (auth / "session.info").write_text(json.dumps(credential()), encoding="utf-8")
+        self.app = admin_server.create_app(root / "management", auth, API, ADMIN)
+        self.store = self.app.state.store
+        self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app),
+                                        base_url="https://console.test")
+
+    async def asyncTearDown(self):
+        await self.client.aclose()
+        self.tmp.cleanup()
+
+    async def login(self):
+        result = await self.client.post("/admin/api/login", json={"key": ADMIN})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.client.headers["X-CSRF-Token"] = result.json()["csrf"]
+
+    async def _create(self, **fields):
+        body = {"name": "验证用密钥", "realm": "cn", "ip_allowlist": ["127.0.0.1"],
+                "models": ["m-a", "m-b"], "max_ips": 3, "quota": 1000,
+                "quota_credit": 5.5, "groups": []}
+        body.update(fields)
+        res = await self.client.post("/admin/api/keys", json=body)
+        self.assertEqual(res.status_code, 200, res.text)
+        return res.json()["id"]
+
+    async def _read(self, kid):
+        keys = (await self.client.get("/admin/api/overview")).json()["keys"]
+        return next(k for k in keys if k["id"] == kid)
+
+    async def test_editing_the_name_leaves_every_other_field_alone(self):
+        """回归：这正是网页端先前**做不到**的事 —— 只有「创建」，没有「编辑」。
+
+        没有编辑入口时，想改配额只能撤销重建，而撤销会换掉密钥明文，
+        所有已配置的客户端都得跟着改。
+        """
+        await self.login()
+        kid = await self._create()
+        before = await self._read(kid)
+
+        # 复刻前端表单：把当前值原样带上，只改 name。
+        res = await self.client.patch(f"/admin/api/keys/{kid}", json={
+            "name": "改过名字", "realm": before["realm"],
+            "ip_allowlist": before["ip_allowlist"], "models": before["models"],
+            "max_ips": before["max_ips"], "quota": before["quota"],
+            "quota_credit": before["quota_credit"], "groups": before["groups"],
+        })
+        self.assertEqual(res.status_code, 200, res.text)
+
+        after = await self._read(kid)
+        self.assertEqual(after["name"], "改过名字")
+        for field in ("realm", "ip_allowlist", "models", "max_ips", "quota", "quota_credit"):
+            with self.subTest(field=field):
+                self.assertEqual(after[field], before[field])
+
+    async def test_editing_does_not_change_the_key_secret(self):
+        """编辑策略绝不能换掉密钥明文 —— 换了所有客户端都得重新配。"""
+        await self.login()
+        kid = await self._create()
+        before = await self._read(kid)
+        await self.client.patch(f"/admin/api/keys/{kid}", json={"name": "新名字"})
+        after = await self._read(kid)
+        self.assertEqual(after["secret"], before["secret"])
+        self.assertTrue(after["secret"])
+
+    async def test_editing_does_not_reset_usage(self):
+        """改配置不该清空已用额度 —— 那等于白送配额，且完全静默。"""
+        await self.login()
+        kid = await self._create()
+        with self.store.lock:
+            self.store.data["keys"][kid]["used_tokens"] = 123
+            self.store.data["keys"][kid]["used_credit"] = 1.5
+        await self.client.patch(f"/admin/api/keys/{kid}", json={"quota": 5000})
+        after = await self._read(kid)
+        self.assertEqual(after["used_tokens"], 123)
+        self.assertEqual(after["used_credit"], 1.5)
+
+    async def test_partial_patch_only_touches_what_was_sent(self):
+        """浅合并语义：只发 enabled，别的字段必须一个都不动。"""
+        await self.login()
+        kid = await self._create()
+        before = await self._read(kid)
+        await self.client.patch(f"/admin/api/keys/{kid}", json={"enabled": False})
+        after = await self._read(kid)
+        self.assertFalse(after["enabled"])
+        for field in ("name", "realm", "ip_allowlist", "models", "max_ips",
+                      "quota", "quota_credit"):
+            with self.subTest(field=field):
+                self.assertEqual(after[field], before[field])
+
+    async def test_empty_groups_means_unrestricted_and_must_be_sendable(self):
+        """空数组是「不限制」的有效取值，不是「没传」。
+
+        前端必须显式带上这个键；否则服务端按「请求里没有该字段」处理，
+        编辑别的字段时分组会被悄悄清空（或反过来，永远解不掉绑定）。
+        """
+        await self.login()
+        group = (await self.client.post("/admin/api/groups", json={"name": "组"})).json()
+        kid = await self._create(groups=[group["id"]])
+        self.assertEqual((await self._read(kid))["groups"], [group["id"]])
+
+        await self.client.patch(f"/admin/api/keys/{kid}", json={"groups": []})
+        self.assertEqual((await self._read(kid))["groups"], [])
+
+    async def test_bad_ip_allowlist_is_rejected_not_silently_stored(self):
+        """非法 IP 要 400。静默存下来会让这条密钥在某天突然连不上，且查不出原因。"""
+        await self.login()
+        kid = await self._create()
+        res = await self.client.patch(f"/admin/api/keys/{kid}", json={"ip_allowlist": ["不是IP"]})
+        self.assertEqual(res.status_code, 400, res.text)
+        self.assertEqual((await self._read(kid))["ip_allowlist"], ["127.0.0.1"])
+
+    async def test_blank_name_is_rejected(self):
+        await self.login()
+        kid = await self._create()
+        res = await self.client.patch(f"/admin/api/keys/{kid}", json={"name": "   "})
+        self.assertEqual(res.status_code, 400, res.text)
+
+    async def test_editing_a_missing_key_is_404(self):
+        await self.login()
+        res = await self.client.patch("/admin/api/keys/no-such-key", json={"name": "x"})
+        self.assertEqual(res.status_code, 404)
+
+    async def test_edits_are_audited_without_leaking_the_secret(self):
+        """审计要记「改了哪些字段」，但请求体里若带了密钥明文也不能落盘。"""
+        await self.login()
+        kid = await self._create()
+        before = await self._read(kid)
+        await self.client.patch(f"/admin/api/keys/{kid}", json={"name": "留痕"})
+        rows = self.store.data.get("audit_logs", [])
+        entry = next(r for r in rows if r.get("action") == "update_key")
+        self.assertIn("name", entry.get("detail", ""))
+        self.assertNotIn(before["secret"], str(rows))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -41,7 +41,18 @@ export function serviceStatus(): Promise<RpServiceStatus> {
 }
 
 export function serviceStart(port?: number): Promise<RpServiceStatus> {
-  return invoke<RpServiceStatus>("reverse_proxy_start", { port: port ?? null });
+  return invoke<RpServiceStatus>("reverse_proxy_start", { port: port ?? null, host: null });
+}
+
+/**
+ * 以指定监听地址重启服务。
+ *
+ * 监听地址是 uvicorn 的启动参数，进程起来后无法更改，所以改地址只能重启。
+ * 桌面端托管时默认只绑 127.0.0.1；只有用户显式要求「对局域网开放」才绑 0.0.0.0。
+ * 这个选择不写进配置：对外开端口应该是每次都要重新确认的动作。
+ */
+export function serviceRestartWithHost(host: "0.0.0.0" | "127.0.0.1"): Promise<RpServiceStatus> {
+  return invoke<RpServiceStatus>("reverse_proxy_restart_with_host", { host });
 }
 
 export function serviceStop(): Promise<RpServiceStatus> {

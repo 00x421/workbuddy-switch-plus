@@ -4,10 +4,10 @@
 <body>
 <section id="login" class="login-screen" hidden>
   <div class="login-story"><a class="brand" href="/admin/"><span class="brand-symbol">w<span>↗</span></span>WORKBUDDY <span class="brand-label">CONSOLE</span></a><div><span class="eyebrow light">YOUR MODELS, CONNECTED.</span><h1>把连接打理好。<br><em>让工作继续。</em></h1><p>在一个地方管理登录凭据、客户端密钥<br>和你的模型连接。</p></div><footer><span class="status-dot"></span> 私有部署 · 你的工作空间</footer></div>
-  <div class="login-form-wrap"><form id="login-form"><span class="eyebrow">WORKSPACE ACCESS</span><h2>登录管理控制台</h2><p class="muted">凭据只保存在服务器，浏览器不留存。客户端 API Key 不适用于此处。</p><div class="login-modes" role="tablist" aria-label="登录方式"><button type="button" class="login-mode is-active" role="tab" aria-selected="true" data-login-mode="user">管理员账号</button><button type="button" class="login-mode" role="tab" aria-selected="false" data-login-mode="key">管理密钥</button><button type="button" class="login-mode" role="tab" aria-selected="false" data-login-mode="token">管理令牌</button></div><div class="login-pane" data-login-pane="user"><label for="login-username">用户名</label><input id="login-username" name="username" autocomplete="username" placeholder="admin" required><label for="login-password">密码</label><input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="输入管理员密码" required></div><div class="login-pane" data-login-pane="key" hidden><label for="admin-key">管理密钥</label><input id="admin-key" name="key" type="password" autocomplete="off" placeholder="输入你的管理密钥" disabled><p class="login-note">部署时通过 <code>ADMIN_KEY</code> 配置的单密钥入口，适合 Docker / 命令行直接跑服务的情况。</p></div><div class="login-pane" data-login-pane="token" hidden><label for="login-token">管理令牌</label><input id="login-token" name="token" type="password" autocomplete="off" placeholder="wbt_…" disabled><p class="login-note">在桌面端「反代服务 → 管理令牌」里生成。只读令牌进得来、看得到数据，但改不了东西；改用户和改令牌这两类操作仍然只认会话登录。</p></div><p id="login-error" class="field-error" role="alert"></p><button class="primary wide" type="submit">进入控制台 <span>↗</span></button><div class="privacy-note"><span>◇</span><p>账号凭据保存在服务器。<br>浏览器不会保存你输入的任何凭据。</p></div></form><span class="login-foot">WorkBuddy / CodeBuddy · API Management</span></div>
+  <div class="login-form-wrap"><form id="login-form"><span class="eyebrow">WORKSPACE ACCESS</span><h2>登录管理控制台</h2><p class="muted">凭据只保存在服务器，浏览器不留存。客户端 API Key 不适用于此处。</p><div class="login-modes" role="tablist" aria-label="登录方式"><button type="button" class="login-mode is-active" role="tab" aria-selected="true" data-login-mode="user">管理员账号</button><button type="button" class="login-mode" role="tab" aria-selected="false" data-login-mode="key">管理密钥</button><button type="button" class="login-mode" role="tab" aria-selected="false" data-login-mode="token">管理令牌</button></div><div class="login-pane" data-login-pane="user"><label for="login-username">用户名</label><input id="login-username" name="username" autocomplete="username" placeholder="admin" required><label for="login-password">密码</label><input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="输入管理员密码" required></div><div class="login-pane" data-login-pane="key" hidden><label for="admin-key">管理密钥</label><input id="admin-key" name="key" type="password" autocomplete="off" placeholder="输入你的管理密钥" disabled><p class="login-note">部署时通过 <code>ADMIN_KEY</code> 配置的单密钥入口，适合 Docker / 命令行直接跑服务的情况。</p></div><div class="login-pane" data-login-pane="token" hidden><label for="login-token">管理令牌</label><input id="login-token" name="token" type="password" autocomplete="off" placeholder="wbt_…" disabled><p class="login-note">在桌面端「反代服务 → 管理令牌」里生成。只读令牌进得来、看得到数据，但改不了东西；改用户和改令牌这两类操作仍然只认会话登录。</p></div><p id="login-error" class="field-error" role="alert"></p><button class="primary wide" type="submit">进入控制台 <span>↗</span></button><div class="privacy-note"><span>◇</span><p>账号凭据保存在服务器。<br>浏览器不会保存你输入的任何凭据。</p></div></form><span class="login-foot">WorkBuddy / CodeBuddy · API Management · <b id="login-version" class="svc-version">v—</b> · <a class="repo-link" href="https://github.com/Hyact/workbuddy-switch-plus" target="_blank" rel="noopener noreferrer">开源地址 ↗</a></span></div>
 </section>
 <div id="workspace" class="app-shell" hidden>
-  <aside class="sidebar"><a class="brand" href="/admin/"><span class="brand-symbol">w<span>↗</span></span><span>WORKBUDDY<small>管理控制台</small></span></a><div class="nav-caption">工作空间</div><nav aria-label="主要导航"><button data-page="dashboard" class="nav-item"><span>▦</span>概览</button><button data-page="accounts" class="nav-item selected"><span>◫</span>账号池</button><button data-page="groups" class="nav-item"><span>❐</span>上游分组</button><button data-page="egress" class="nav-item"><span>⇥</span>出口线路</button><button data-page="logs" class="nav-item"><span>▤</span>请求日志</button><button data-page="keys" class="nav-item"><span>⌘</span>API 密钥</button><button data-page="settings" class="nav-item"><span>⚙</span>服务设置</button><button data-page="test" class="nav-item"><span>↗</span>连接测试</button><button data-page="guide" class="nav-item"><span>≡</span>接入指南</button></nav><div class="sidebar-bottom"><span class="tag">PRIVATE WORKSPACE</span><p><i class="status-dot"></i> 服务已连接</p><button id="logout" class="logout">退出登录 <span>↗</span></button></div></aside>
+  <aside class="sidebar"><a class="brand" href="/admin/"><span class="brand-symbol">w<span>↗</span></span><span>WORKBUDDY<small>管理控制台</small></span></a><div class="nav-caption">工作空间</div><nav aria-label="主要导航"><button data-page="dashboard" class="nav-item"><span>▦</span>概览</button><button data-page="accounts" class="nav-item selected"><span>◫</span>账号池</button><button data-page="groups" class="nav-item"><span>❐</span>上游分组</button><button data-page="egress" class="nav-item"><span>⇥</span>出口线路</button><button data-page="logs" class="nav-item"><span>▤</span>请求日志</button><button data-page="keys" class="nav-item"><span>⌘</span>API 密钥</button><button data-page="settings" class="nav-item"><span>⚙</span>服务设置</button><button data-page="test" class="nav-item"><span>↗</span>连接测试</button><button data-page="guide" class="nav-item"><span>≡</span>接入指南</button></nav><div class="sidebar-bottom"><span class="tag">PRIVATE WORKSPACE</span><p><i class="status-dot"></i> 服务已连接 <b id="sidebar-version" class="svc-version">v—</b></p><a class="repo-link" href="https://github.com/Hyact/workbuddy-switch-plus" target="_blank" rel="noopener noreferrer" title="查看开源仓库">★ 开源地址<span>↗</span></a><button id="logout" class="logout">退出登录 <span>↗</span></button></div></aside>
   <div class="main-shell"><header class="topbar"><div><span class="muted">工作空间</span><span class="slash">/</span><span id="breadcrumb">账号管理</span></div><div class="topbar-right"><span id="host-label" class="mono"></span><span class="avatar">W</span></div></header>
   <main>
     <div class="page-title"><div><span id="page-kicker" class="eyebrow">ACCOUNT DIRECTORY</span><h1 id="page-title">账号管理<span class="title-dot">.</span></h1><p id="page-desc" class="muted">集中管理登录凭据、积分与账号可用状态。</p></div><button id="refresh" class="secondary"><span>↻</span> 刷新状态</button></div>
@@ -51,11 +51,11 @@
       <div class="section-toolbar"><div><h2>账号参与情况</h2><p>按账号汇总缓冲内的请求与消耗，用来核对轮转是否均匀。</p></div></div>
       <div id="log-account-list" class="log-accounts"></div>
       <div class="section-toolbar"><div><h2>请求明细 <span id="log-badge" class="count-badge">0</span></h2><p>切到本页时立即读取，之后每 5 秒自动刷新（页面不可见时暂停）。<span id="logs-updated" class="muted"></span></p></div><div class="seg" role="group" aria-label="明细呈现方式"><button id="log-view-flat" class="secondary" aria-pressed="true">明细表</button><button id="log-view-grouped" class="secondary" aria-pressed="false">按分组</button></div></div>
-      <div class="pool-toolbar"><select id="log-account" data-all="全部账号" aria-label="按账号筛选"><option value="all">全部账号</option></select><select id="log-model" data-all="全部模型" aria-label="按模型筛选"><option value="all">全部模型</option></select><select id="log-outcome" data-all="全部结果" aria-label="按结果筛选"><option value="all">全部结果</option><option value="success">成功</option><option value="upstream_error">上游报错</option><option value="no_account">无可用账号</option><option value="rejected">被规则拒绝</option></select><select id="log-group" data-all="全部分组" aria-label="按分组筛选"><option value="all">全部分组</option></select><button id="log-clear-filter" class="secondary">清除筛选</button></div>
-      <div id="log-flat-view" class="table-wrap"><table><thead><tr><th>时间</th><th>账号</th><th>分组</th><th>模型</th><th>结果</th><th class="align-right">Token</th><th class="align-right">积分</th><th class="align-right">耗时</th></tr></thead><tbody id="logs-body"></tbody></table></div>
+      <div class="pool-toolbar"><select id="log-account" data-all="全部账号" aria-label="按账号筛选"><option value="all">全部账号</option></select><select id="log-key" data-all="全部密钥" aria-label="按密钥筛选"><option value="all">全部密钥</option></select><select id="log-model" data-all="全部模型" aria-label="按模型筛选"><option value="all">全部模型</option></select><select id="log-outcome" data-all="全部结果" aria-label="按结果筛选"><option value="all">全部结果</option><option value="success">成功</option><option value="upstream_error">上游报错</option><option value="no_account">无可用账号</option><option value="rejected">被规则拒绝</option></select><select id="log-group" data-all="全部分组" aria-label="按分组筛选"><option value="all">全部分组</option></select><button id="log-clear-filter" class="secondary">清除筛选</button></div>
+      <div id="log-flat-view" class="table-wrap"><table><thead><tr><th>时间</th><th>账号</th><th>密钥</th><th>分组</th><th>模型</th><th>结果</th><th class="align-right">Token</th><th class="align-right">积分</th><th class="align-right">耗时</th></tr></thead><tbody id="logs-body"></tbody></table></div>
       <div id="log-grouped-view" class="log-groups" hidden></div>
     </section>
-    <section id="page-keys" class="page-panel" hidden><div class="banner">API Key 用于客户端调用。密钥明文保存在本机 state.json 中，可随时点右侧的眼睛图标在掩码与明文之间切换；点「撤销」后立即停止接受新请求。</div><div class="section-toolbar"><div><h2>管理员密钥</h2><p>由你在这里创建，用于本机或自有客户端调用，可绑分组、设配额。</p></div><button id="add-key" class="primary">＋ 创建密钥</button></div><div class="table-wrap"><table><thead><tr><th>名称</th><th>密钥</th><th>创建时间</th><th>上游分组</th><th class="align-right">操作</th></tr></thead><tbody id="keys-body"></tbody></table></div>
+    <section id="page-keys" class="page-panel" hidden><div class="banner">API Key 用于客户端调用。密钥明文保存在本机 state.json 中，可随时点右侧的眼睛图标在掩码与明文之间切换；点「撤销」后立即停止接受新请求。</div><div class="section-toolbar"><div><h2>管理员密钥</h2><p>由你在这里创建，用于本机或自有客户端调用，可绑分组、设配额。</p></div><button id="add-key" class="primary">＋ 创建密钥</button></div><div class="table-wrap"><table><thead><tr><th>名称</th><th>密钥</th><th>状态</th><th>创建时间</th><th>上游分组</th><th>额度与限制</th><th class="align-right">操作</th></tr></thead><tbody id="keys-body"></tbody></table></div>
       <div class="table-wrap"><table><thead><tr><th>名称</th><th>密钥</th><th>创建时间</th><th>上游分组</th><th class="align-right">操作</th></tr></thead><tbody id="member-keys-body"></tbody></table></div></section>
 
 
@@ -71,13 +71,90 @@
           <label>站点名称<input id="set-site-name" type="text" maxlength="60" placeholder="留空则使用默认名称"></label>
           <div class="dialog-actions-inline"><button type="submit" id="set-profile-submit" class="primary">保存</button></div>
         </form>
+
+        <form id="set-alerts-form" class="surface">
+          <span class="eyebrow">ALERTS</span>
+          <h2>告警通知</h2>
+          <p class="muted">账号出现封禁、冻结、积分告急等情况时，发邮件提醒你。只发给下面填写的收件地址，不涉及任何终端用户。</p>
+
+          <label class="inline-checkbox"><input id="alerts-enabled" type="checkbox">启用告警邮件</label>
+
+          <label for="alerts-to">收件地址 <span class="muted">（多个用逗号分隔）</span></label>
+          <input id="alerts-to" type="text" maxlength="500" placeholder="you@example.com" spellcheck="false">
+
+          <label for="alerts-threshold">积分告急阈值</label>
+          <input id="alerts-threshold" type="number" min="0" max="10000000" step="1" placeholder="100">
+          <small class="cell-note">账号剩余积分低于或等于该值时提醒。</small>
+
+          <div class="alert-kinds">
+            <span class="cell-note">账号类</span>
+            <label class="inline-checkbox"><input id="alerts-on-banned" type="checkbox" checked>账号封禁告急</label>
+            <label class="inline-checkbox"><input id="alerts-on-frozen" type="checkbox" checked>模型冻结告急</label>
+            <label class="inline-checkbox"><input id="alerts-on-upstream-disabled" type="checkbox" checked>上游停用告急</label>
+            <label class="inline-checkbox"><input id="alerts-on-refresh-failed" type="checkbox" checked>凭据刷新失败</label>
+
+            <span class="cell-note">额度类</span>
+            <label class="inline-checkbox"><input id="alerts-on-credits" type="checkbox" checked>积分用量告急</label>
+            <label class="inline-checkbox"><input id="alerts-on-quota" type="checkbox" checked>密钥额度告急</label>
+            <label class="inline-checkbox"><input id="alerts-on-key-rejected" type="checkbox" checked>密钥连续被拒</label>
+
+            <span class="cell-note">池与数据类</span>
+            <label class="inline-checkbox"><input id="alerts-on-pool-empty" type="checkbox" checked>可用账号池见底</label>
+            <label class="inline-checkbox"><input id="alerts-on-pool-thin" type="checkbox">可用账号池偏少</label>
+            <label class="inline-checkbox"><input id="alerts-on-stale" type="checkbox" checked>积分快照过期</label>
+          </div>
+
+          <div class="field-row">
+            <label for="alerts-quota-percent">密钥额度阈值（%）<input id="alerts-quota-percent" type="number" min="1" max="100" step="1" placeholder="90"></label>
+            <label for="alerts-pool-min">池下限（可用账号数）<input id="alerts-pool-min" type="number" min="0" max="1000" step="1" placeholder="1"></label>
+          </div>
+          <div class="field-row">
+            <label for="alerts-stale-minutes">快照过期（分钟）<input id="alerts-stale-minutes" type="number" min="1" max="100000" step="1" placeholder="120"></label>
+            <label for="alerts-key-rejects">密钥被拒次数<input id="alerts-key-rejects" type="number" min="1" max="10000" step="1" placeholder="5"></label>
+          </div>
+          <small class="cell-note">不限量的密钥（额度为 0）不会被报成「额度告急」。</small>
+
+          <label for="alerts-host">SMTP 服务器</label>
+          <input id="alerts-host" type="text" maxlength="200" placeholder="smtp.example.com" spellcheck="false">
+
+          <div class="field-row">
+            <label for="alerts-port">端口<input id="alerts-port" type="number" min="1" max="65535" placeholder="465"></label>
+            <label for="alerts-tls">加密方式<select id="alerts-tls">
+              <option value="ssl">SSL（465）</option>
+              <option value="starttls">STARTTLS（587）</option>
+              <option value="none">不加密</option>
+            </select></label>
+          </div>
+
+          <label for="alerts-username">SMTP 账号</label>
+          <input id="alerts-username" type="text" maxlength="200" placeholder="you@example.com" spellcheck="false" autocomplete="off">
+
+          <label for="alerts-password">SMTP 授权码</label>
+          <input id="alerts-password" type="password" maxlength="200" placeholder="留空表示不修改" autocomplete="new-password">
+          <small class="cell-note">以加密形式保存在服务器，不回显。多数邮箱需要的是「授权码」而不是登录密码。</small>
+
+          <label for="alerts-sender">发件人 <span class="muted">（选填）</span></label>
+          <input id="alerts-sender" type="text" maxlength="200" placeholder="留空则使用上面的 SMTP 账号" spellcheck="false">
+
+          <div class="field-row">
+            <label for="alerts-quiet-from">静默开始<input id="alerts-quiet-from" type="number" min="0" max="23" placeholder="留空不静默"></label>
+            <label for="alerts-quiet-to">静默结束<input id="alerts-quiet-to" type="number" min="0" max="23" placeholder="整点小时"></label>
+          </div>
+          <small class="cell-note">例如 23 → 7 表示这段时间内不发信（可跨零点）。</small>
+
+          <div class="dialog-actions-inline">
+            <button type="submit" id="set-alerts-submit" class="primary">保存</button>
+            <button type="button" id="alerts-test" class="secondary">发送测试邮件</button>
+          </div>
+          <p id="alerts-note" class="cell-note" hidden></p>
+        </form>
       </div>
 
       
     </section>
     <section id="page-test" class="page-panel" hidden><div class="test-layout"><form id="test-form" class="surface test-form"><span class="eyebrow">LIVE REQUEST</span><h2>发送一条真实请求</h2><p class="muted">使用当前选中的账号，测试会消耗少量上游额度。</p><div class="active-strip">当前账号 <strong id="test-account">—</strong></div><label for="model">测试模型</label><select id="model" required></select><label for="test-prompt">消息</label><textarea id="test-prompt" rows="5" maxlength="2000" required>请只回复：连接成功</textarea><button id="test-submit" class="primary wide" type="submit">发送测试 ↗</button></form><article class="surface response-surface"><div class="response-header"><h2>响应结果</h2><span id="test-status" class="pill">等待请求</span></div><pre id="test-output" class="test-output">选择模型并发送消息，结果将在这里显示。</pre><div id="test-meta" class="muted mono"></div></article></div><div class="section-toolbar"><div><h2>本次运行的测试记录</h2><p>仅记录状态与耗时，不记录测试消息或回复。</p></div></div><div id="test-history" class="history"></div></section>
     <section id="page-guide" class="page-panel" hidden><div class="guide-grid"><article class="surface"><span class="eyebrow">01 / CREDENTIALS</span><h2>添加登录凭据</h2><p>优先使用“添加账号 → 浏览器登录”，在官方页面授权后自动保存，无需桌面客户端。也可在桌面端登录后，按 Win + R 打开以下目录导入文件：</p><div class="code-block"><code>%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth</code><button data-copy="%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth" class="copy-button">复制</button></div><p>将其中的 <code>.info</code> 文件拖入“添加账号”，或粘贴其 JSON 内容。支持保留多个账号并手动切换；浏览器授权和文件导入可同时使用。</p></article><article class="surface"><span class="eyebrow">02 / CLIENTS</span><h2>连接你的客户端</h2><label>OpenAI / Responses Base URL</label><div class="code-block"><code id="base-url"></code><button id="copy-base" class="copy-button">复制</button></div><label>Anthropic Base URL</label><div class="code-block"><code id="anthropic-url"></code><button id="copy-anthropic" class="copy-button">复制</button></div><p>在“API 密钥”创建 Key 后填入客户端。模型可先使用 <code>deepseek-v4.1-flash</code>；列表中的其他模型是否可用取决于账号权限。</p></article></div><article class="surface endpoints"><h2>支持的接口</h2><div><span>POST</span><code>/v1/chat/completions</code><p>OpenAI Chat Completions</p></div><div><span>POST</span><code>/v1/responses</code><p>Responses 客户端</p></div><div><span>POST</span><code>/v1/messages</code><p>Anthropic Messages</p></div><div><span>GET</span><code>/v1/models</code><p>内置模型列表</p></div></article></section>
-    <footer class="main-footer"><span>WORKBUDDY CONSOLE</span><span>凭据管理 · 安全连接 · 即时验证</span></footer>
+    <footer class="main-footer"><span>WORKBUDDY CONSOLE</span><span>凭据管理 · 安全连接 · 即时验证</span><a class="repo-link" href="https://github.com/Hyact/workbuddy-switch-plus" target="_blank" rel="noopener noreferrer" title="查看开源仓库">开源地址 ↗</a></footer>
   </main></div>
 </div>
 <dialog id="account-dialog"><form id="account-form"><div class="dialog-heading"><div><span class="eyebrow">ADD ACCOUNT</span><h2>添加账号</h2></div><button type="button" class="icon-button close-dialog" aria-label="关闭">×</button></div><p class="muted">在官方页面完成登录，授权凭据保存在你的服务器。</p>
@@ -85,7 +162,77 @@
 <label for="account-name">账号备注 <span class="muted">（选填）</span></label><input id="account-name" maxlength="60" placeholder="例如：日常开发、备用账号">
 <section id="browser-login-panel"><div class="oauth-step"><span class="step-number">1</span><div><h3>在 WorkBuddy 完成登录</h3><p class="muted">生成专属链接，在官方页面完成扫码或账号登录。支持国内 CodeBuddy / WorkBuddy 账号。</p><button type="button" id="oauth-start" class="secondary">生成登录链接 ↗</button><div id="oauth-link-box" hidden><a id="oauth-open" class="primary" target="_blank" rel="noopener noreferrer">打开官方登录页面 ↗</a><button type="button" id="oauth-copy" class="text-button">复制链接</button></div></div></div><div class="oauth-step"><span class="step-number">2</span><div><h3>返回这里，自动保存账号</h3><p class="muted">完成登录后保持此窗口打开，系统会自动获取授权结果，无需复制回调地址。</p></div></div><div id="oauth-status" class="banner oauth-status" role="status" aria-live="polite">登录链接 5 分钟内有效。同一账号重新登录会更新凭据。</div><button type="button" id="oauth-retry" class="secondary" hidden>重新检查授权状态</button></section>
 <div id="file-import-panel" hidden><label id="file-drop" class="file-drop" for="credential-file"><span>↥</span><strong id="file-label">选择或拖入 .info / .json 文件</strong><small>文件最大 1 MB · 内容仅传入你的服务器</small><input id="credential-file" type="file" accept=".info,.json,application/json"></label><details><summary>或粘贴 JSON 内容</summary><label for="credential-json" class="sr-only">登录凭据 JSON</label><textarea id="credential-json" rows="6" placeholder='包含 "auth" 和 "account" 的完整 JSON' spellcheck="false"></textarea></details></div><p id="account-error" class="field-error" role="alert"></p><div class="dialog-actions"><button type="button" class="secondary close-dialog">取消</button><button id="account-import" type="submit" class="primary" hidden>导入账号</button></div></form></dialog>
-<dialog id="key-dialog"><form id="key-form"><div class="dialog-heading"><div><span class="eyebrow">NEW API KEY</span><h2>创建客户端密钥</h2></div><button type="button" class="icon-button close-dialog" aria-label="关闭">×</button></div><label for="key-name">密钥名称</label><input id="key-name" placeholder="例如：Cherry Studio" maxlength="60" required><label>上游分组 <span class="muted">（选填）</span></label><div id="key-groups" class="check-list"></div><p id="key-error" class="field-error" role="alert"></p><div class="dialog-actions"><button type="button" class="secondary close-dialog">取消</button><button type="submit" class="primary">创建密钥</button></div></form><div id="created-key" hidden><span class="eyebrow">KEY CREATED</span><h2>保存你的新密钥</h2><p class="muted">关闭后无法再次查看完整内容。请复制到安全的位置。</p><div class="secret-value"><code id="new-key-value"></code></div><div class="dialog-actions"><button id="copy-key" class="secondary">复制密钥</button><button class="primary close-dialog">我已保存</button></div></div></dialog>
+<dialog id="key-dialog">
+    <form id="key-form">
+      <div class="dialog-heading">
+        <div><span class="eyebrow" id="key-dialog-eyebrow">NEW API KEY</span><h2 id="key-dialog-title">创建客户端密钥</h2></div>
+        <button type="button" class="icon-button close-dialog" aria-label="关闭">&times;</button>
+      </div>
+      <input id="key-id" type="hidden">
+
+      <label for="key-name">密钥名称</label>
+      <input id="key-name" placeholder="例如：Cherry Studio" maxlength="60" required>
+
+      <label for="key-realm">版本归属</label>
+      <select id="key-realm">
+        <option value="">不限制</option>
+        <option value="cn">仅国内版</option>
+        <option value="global">仅国际版</option>
+      </select>
+
+      <label>上游分组 <span class="muted">（选填；一个都不勾 = 可用全部账号）</span></label>
+      <div id="key-groups" class="check-list"></div>
+
+      <label for="key-ip-allowlist">IP 白名单 <span class="muted">（每行一个 IP 或 CIDR，留空不限制）</span></label>
+      <textarea id="key-ip-allowlist" rows="3" spellcheck="false" placeholder="127.0.0.1&#10;10.0.0.0/8"></textarea>
+
+      <label for="key-models">模型白名单 <span class="muted">（每行一个，留空不限制）</span></label>
+      <textarea id="key-models" rows="3" spellcheck="false" placeholder="留空表示可以使用任何模型"></textarea>
+      <p class="muted" id="key-models-hint"></p>
+
+      <div class="field-grid">
+        <div>
+          <label for="key-max-ips">最大 IP 数</label>
+          <input id="key-max-ips" type="number" min="0" value="0">
+          <small class="cell-note">0 = 不限</small>
+        </div>
+        <div>
+          <label for="key-expires-days">有效期（天）</label>
+          <input id="key-expires-days" type="number" min="0" value="0">
+          <small class="cell-note">0 = 永不过期</small>
+        </div>
+        <div>
+          <label for="key-quota">Token 额度</label>
+          <input id="key-quota" type="number" min="0" value="0">
+          <small class="cell-note">0 = 不限</small>
+        </div>
+        <div>
+          <label for="key-quota-credit">积分额度</label>
+          <input id="key-quota-credit" type="number" min="0" step="0.01" value="0">
+          <small class="cell-note">0 = 不限</small>
+        </div>
+      </div>
+
+      <label class="inline-checkbox" id="key-enabled-row" hidden>
+        <input id="key-enabled" type="checkbox" checked>启用该密钥
+      </label>
+
+      <p id="key-error" class="field-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button type="button" class="secondary close-dialog">取消</button>
+        <button type="submit" class="primary" id="key-submit">创建密钥</button>
+      </div>
+    </form>
+    <div id="created-key" hidden>
+      <span class="eyebrow">KEY CREATED</span><h2>保存你的新密钥</h2>
+      <p class="muted">关闭后无法再次查看完整内容。请复制到安全的位置。</p>
+      <div class="secret-value"><code id="new-key-value"></code></div>
+      <div class="dialog-actions">
+        <button id="copy-key" class="secondary">复制密钥</button>
+        <button class="primary close-dialog">我已保存</button>
+      </div>
+    </div>
+  </dialog>
 <dialog id="group-dialog"><form id="group-form"><div class="dialog-heading"><div><span class="eyebrow">UPSTREAM GROUP</span><h2 id="group-dialog-title">新建分组</h2></div><button type="button" class="icon-button close-dialog" aria-label="关闭">×</button></div><input id="group-id" type="hidden">
 <label for="group-name">分组名称</label><input id="group-name" maxlength="40" placeholder="例如：主力线路" required>
 <label for="group-desc">描述 <span class="muted">（选填）</span></label><input id="group-desc" maxlength="120" placeholder="例如：按量计费、低延迟">

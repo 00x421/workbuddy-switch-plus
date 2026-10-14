@@ -380,6 +380,141 @@ export type RpSettingsPatch = {
   site_name?: string;
 };
 
+// ── 告警通知（/admin/api/alerts）────────────────────────────────────────
+//
+// 只发信给管理员自己（封禁 / 冻结 / 积分告急），**不是用户系统**：
+// 没有注册、没有找回密码、没有面向终端用户的收件人。
+
+/** 可单独开关的告警类型。与后端 alerts.FLAG_KEYS 一一对应（有测试钉住）。 */
+export type RpAlertFlag =
+  | "notify_on_banned"
+  | "notify_on_frozen"
+  | "notify_on_credits"
+  | "notify_on_upstream_disabled"
+  | "notify_on_quota"
+  | "notify_on_pool_empty"
+  | "notify_on_pool_thin"
+  | "notify_on_stale"
+  | "notify_on_refresh_failed"
+  | "notify_on_key_rejected";
+
+export type RpAlerts = {
+  enabled: boolean;
+  /** 收件地址，多个用逗号分隔。 */
+  to: string;
+  host: string;
+  port: number;
+  username: string;
+  /**
+   * SMTP 口令。服务端只回掩码（`password_set` 说明是否已配置），
+   * **永远拿不到明文**。所以提交时若值是掩码，必须原样退回，
+   * 否则会把真口令覆盖成那串掩码字符。
+   */
+  password: string;
+  password_set: boolean;
+  sender: string;
+  tls: "ssl" | "starttls" | "none" | string;
+  /** 账号剩余积分低于或等于该值时提醒。 */
+  credits_threshold: number;
+  /** 密钥额度使用百分比阈值。 */
+  quota_percent: number;
+  /** 池内可用账号少于该数量时提醒。 */
+  pool_min_available: number;
+  /** 数据超过该分钟数未更新时提醒。 */
+  stale_minutes: number;
+  /** 同一密钥在该次数内被拒就提醒。 */
+  key_reject_threshold: number;
+  quiet_from: string | null;
+  quiet_to: string | null;
+} & Partial<Record<RpAlertFlag, boolean>>;
+
+// ── 模型别名（/admin/api/model-aliases）────────────────────────────────
+
+export type RpModelAliases = {
+  /** 别名 → 真实模型名。 */
+  aliases: Record<string, string>;
+  /** 本机已知模型，用于校验别名指向。 */
+  known_models: string[];
+  default_model: string;
+  /** 别名指向的模型不在已知清单里（多半拼错，或本机还没下发该模型）。 */
+  unknown_targets: string[];
+};
+
+// ── 用量统计（/admin/api/usage/stats）──────────────────────────────────
+//
+// 与「请求日志」的分工：那边是最近若干条的**明细**，这边是长期**分桶计数**，
+// 落盘在 state.json，重启不丢。
+
+export type RpUsageBucket = {
+  /** 按天的是 `date`（YYYY-MM-DD），按小时的是 `hour`（YYYY-MM-DDTHH）。 */
+  date?: string;
+  hour?: string;
+  calls: number;
+  failed: number;
+  /** 成功数 = calls - failed，后端直接给，免得前端各算各的。 */
+  success: number;
+  /** 失败率，0~1 的小数（后端算好四舍五入到 4 位）。 */
+  failure_rate: number;
+  tokens: number;
+  credit: number;
+  /** 平均 token / 平均耗时 / 平均首字延迟，都是后端算好的。 */
+  tokens_avg: number;
+  duration_ms: number;
+  duration_ms_avg: number;
+  first_token_ms: number;
+  /**
+   * 首字延迟均值。后端**只对成功的请求**求平均 —— 失败请求根本没有首字，
+   * 算进去会把均值拉低，看着像"变快了"。
+   */
+  first_token_ms_avg: number;
+};
+
+export type RpUsageTotals = {
+  calls: number;
+  failed: number;
+  success: number;
+  failure_rate: number;
+  tokens: number;
+  credit: number;
+  tokens_avg: number;
+  duration_ms_avg: number;
+};
+
+export type RpUsageStats = {
+  daily: RpUsageBucket[];
+  hourly: RpUsageBucket[];
+  /** 按天 / 按小时各自的总量。 */
+  totals: { daily: RpUsageTotals; hourly: RpUsageTotals };
+  /** 实际生效的窗口，以及后端保留上限（可据此提示"只看得到最近 N 天"）。 */
+  window: { days: number; hours: number; daily_keep: number; hourly_keep: number };
+};
+
+/**
+ * 服务端回给前端的口令掩码，与 `alerts.MASKED` 必须一致。
+ *
+ * 这是"只回掩码"这个设计在前端唯一需要知道的东西：看到它就知道
+ * **本机并不知道真口令**，因此提交时必须把这个键整个去掉，
+ * 而不是把掩码当作新口令发回去。
+ */
+export const ALERT_PASSWORD_MASK = "********";
+
+/**
+ * 提交告警配置前，把"其实是掩码"的口令字段剔掉。
+ *
+ * 不做这一步的后果是静默的：提交后接口返回 200、界面显示保存成功，
+ * 但服务端里存的口令已经变成 `********` 了 —— 之后所有告警邮件都发不出去，
+ * 而用户以为自己只是"改了个阈值"。
+ *
+ * 空字符串按"用户主动清空"处理，保留；只有掩码才剔除。
+ */
+export function pickAlertPatch(form: Partial<RpAlerts>): Partial<RpAlerts> {
+  const patch: Partial<RpAlerts> = { ...form };
+  if (patch.password === ALERT_PASSWORD_MASK) delete patch.password;
+  // 只读字段：服务端算出来的状态，回传没意义，还可能让 normalize 报错。
+  delete patch.password_set;
+  return patch;
+}
+
 // ── 接口 ──────────────────────────────────────────────────────────────
 export const rp = {
   /** 多用户登录（用户名 + 口令，PBKDF2）。 */
@@ -465,8 +600,7 @@ export const rp = {
       "test", { method: "POST", body: { model, prompt } }),
 
   // 上游分组：把账号池切成互不干扰的子池，密钥只落在自己那一组里。
-  groups: () => request<RpGroupsPayload>("groups"),
-  createGroup: (body: { name: string; description?: string; accounts?: string[]; routing?: string; enabled?: boolean }) =>
+  groups: () => request<RpGroupsPayload>("groups"),  createGroup: (body: { name: string; description?: string; accounts?: string[]; routing?: string; enabled?: boolean }) =>
     request<{ ok: boolean; id: string; name: string } & { groups: RpGroup[] }>("groups", { method: "POST", body }),
   updateGroup: (id: string, body: Partial<Pick<RpGroup, "name" | "description" | "enabled" | "routing">> & { accounts?: string[] }) =>
     request<{ ok: boolean; groups: RpGroup[] }>(`groups/${id}`, { method: "PATCH", body }),
@@ -490,6 +624,41 @@ export const rp = {
   settings: () => request<RpServiceSettings>("settings"),
   /** 改设置。浅合并：只更新请求体里出现过的键。 */
   saveSettings: (body: RpSettingsPatch) => request<RpServiceSettings>("settings", { method: "PUT", body }),
+
+  // ── 告警通知 ────────────────────────────────────────────────────────
+  /** 读告警配置。只读角色也能看（口令只回掩码）。 */
+  alerts: () => request<RpAlerts>("alerts"),
+  /**
+   * 改告警配置。浅合并 —— 只传要改的字段。
+   *
+   * **口令字段有坑**：服务端只回掩码，所以表单里那个值可能是掩码而不是真口令。
+   * 如果原样提交，就会把真口令覆盖成掩码字符。调用方必须在值是掩码时
+   * 把这个键去掉（见 `pickAlertPatch`），不要在这里补救 ——
+   * 这里看不出"用户是没改"还是"用户真想设成这个值"。
+   */
+  saveAlerts: (body: Partial<RpAlerts>) => request<RpAlerts>("alerts", { method: "PUT", body }),
+  /**
+   * 发一封测试邮件。
+   *
+   * 这是配置类功能唯一可靠的自证方式 —— 否则只能等下一次真告警才知道
+   * "原来没配通"，而那时候问题已经发生了。
+   */
+  testAlerts: () => request<{ ok: boolean; message: string }>("alerts/test", { method: "POST" }),
+
+  // ── 模型别名 ────────────────────────────────────────────────────────
+  modelAliases: () => request<RpModelAliases>("model-aliases"),
+  /**
+   * **整表替换**别名映射，传空对象即清空。
+   *
+   * 后端刻意做成整表替换而不是逐条增删：别名表很小（十几条），整表提交能
+   * 避开"先删后加"的中间态被读到的竞态。
+   */
+  saveModelAliases: (aliases: Record<string, string>) =>
+    request<{ ok: boolean; aliases: Record<string, string> }>("model-aliases", { method: "POST", body: { aliases } }),
+
+  // ── 用量统计 ────────────────────────────────────────────────────────
+  usageStats: (days = 30, hours = 24) =>
+    request<RpUsageStats>(`usage/stats?days=${days}&hours=${hours}`),
 };
 
 /** 请求日志里 outcome 字段的中文与色调。 */

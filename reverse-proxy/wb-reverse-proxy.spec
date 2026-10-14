@@ -67,6 +67,15 @@ datas = [
     (str(ROOT / "admin" / "static"), "admin/static"),
 ]
 
+# 版本文件必须**打进包内**。构建时设的环境变量不会留在 exe 里 ——
+# os.environ 是运行期读的，所以 exe 在别的机器上跑时那个变量根本不存在。
+# 打成数据文件才是"跟着产物走"的版本号。
+# 文件由 build-exe.py 在调用本 spec 之前写好；直接跑 spec 时可能还没有，
+# 那就跳过（版本会回落成 dev，不会让打包失败）。
+_version_file = ROOT / "version.json"
+if _version_file.exists():
+    datas.append((str(_version_file), "."))
+
 excludes = [
     "tkinter", "matplotlib", "numpy", "pandas", "PIL",
     "pytest", "_pytest", "unittest", "pydoc", "doctest",

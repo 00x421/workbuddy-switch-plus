@@ -17,6 +17,7 @@ import httpx
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
+from . import alerts
 from . import egress
 from . import groups
 from . import keysvc
@@ -29,6 +30,95 @@ from .iputil import client_ip_from_scope
 REQUEST_CREDENTIAL = ContextVar("pool_credential", default=None)
 CN = timezone(timedelta(hours=8))
 BILLING = "https://www.codebuddy.cn/v2/billing/meter/"
+# 企业配额接口：企业账号不走个人版资源接口，官方按 `enterpriseId` 分流到这里；
+# 国内版与国际版路径同构（与桌面端 credits.rs 的 ENTERPRISE_USAGE_PATH 同值）。
+ENTERPRISE_USAGE = "https://www.codebuddy.cn/v2/billing/meter/get-enterprise-user-usage"
+
+
+def enterprise_id_of(headers) -> str:
+    """从请求头里取企业 ID（账号是企业版时非空）。
+
+    请求头由 switch_store 的鉴权链路统一注入：企业账号会同时带
+    `X-Enterprise-Id` 与 `X-Tenant-Id`，个人账号两个都不带。
+    """
+    if not headers:
+        return ""
+    for key in ("X-Enterprise-Id", "X-Tenant-Id"):
+        value = headers.get(key) if hasattr(headers, "get") else None
+        if value:
+            return str(value).strip()
+    return ""
+
+
+def parse_enterprise_usage(payload):
+    """解析企业配额响应 → (limit_num, used, cycle_reset_at) 或 None。
+
+    兼容 `{data:{data:{…}}}` / `{data:{…}}` / 字段直接在顶层三种包装，
+    以及 camelCase 与 snake_case 两种命名（官方两处实现各用一种）。
+    总量缺失或非有限数字视为解析失败，由调用方给出可读错误。
+    """
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    nested = data.get("data") if isinstance(data.get("data"), dict) else {}
+    for candidate in (nested, data, payload):
+        if not isinstance(candidate, dict):
+            continue
+        limit_num = _first_number(candidate, ("limitNum", "limit_num"))
+        if limit_num is None:
+            continue
+        used = _first_number(candidate, ("credit", "used_num")) or 0.0
+        used = max(0.0, used)
+        reset = _first_value(candidate, ("cycleResetTime", "CycleResetTime"))
+        return limit_num, used, _parse_reset_time(reset)
+    return None
+
+
+def _first_number(payload, keys):
+    for key in keys:
+        if key in payload:
+            try:
+                v = payload[key]
+                if isinstance(v, bool):
+                    continue
+                n = float(v)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(n):
+                return n
+    return None
+
+
+def _first_value(payload, keys):
+    for key in keys:
+        if payload.get(key) not in (None, ""):
+            return payload[key]
+    return None
+
+
+def _parse_reset_time(value):
+    """周期重置时间 → datetime，解析不出来返回 None（不阻塞展示）。"""
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        n = float(value)
+        if not math.isfinite(n) or n <= 0:
+            return None
+        # 毫秒与秒都接受：大于 1e11 视为毫秒（约 1973 年以后）。
+        seconds = n / 1000.0 if n > 1e11 else n
+        try:
+            return datetime.fromtimestamp(seconds, CN)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=CN)
+        except ValueError:
+            continue
+    return None
 
 # 签到日志上限：只留最近这些条，落盘在 state.json 里。
 CHECKIN_LOG_LIMIT = 500
@@ -523,7 +613,8 @@ class AccountPool:
             self.store.save()
 
     def log_request(self, aid, model, status, ok, tokens, credit, duration_ms, outcome, source="api", *,
-                    first_token_ms=0, cached_tokens=0, upstream_model=None, key_id=None, key_hint=None):
+                    first_token_ms=0, cached_tokens=0, upstream_model=None, key_id=None, key_hint=None,
+                    key_name=None):
         """记一条请求日志：哪个账号、什么模型、花了多少。
 
         只有调度真正选中账号之后才会调用；`aid=None` 表示这一步就失败了
@@ -534,6 +625,15 @@ class AccountPool:
 
         `model` 是客户端请求的名字，`upstream_model` 是别名映射后真正转发出去的名字——
         两者不同时，排查「明明选了 A 却在跑 B」就靠它俩对比。
+
+        密钥三兄弟各管一段，**必须全存**：
+          · `key_id`   —— 稳定标识，用来 join 分组、配额、IP 白名单
+          · `key_name` —— 人给密钥起的名字，写日志时就固化下来
+          · `key_hint` —— 密钥本身的脱敏片段（`sk-ab…1234`）
+
+        `key_name` 刻意**冗余存一份**，而不是留给前端去 join `overview.keys`：
+        密钥是可以被删的，删掉之后历史记录就再也说不出「当时是谁在用」了。
+        日志是事后取证用的，不该依赖一个会被删的当前值。
         """
         if aid is None:
             name = None
@@ -558,6 +658,7 @@ class AccountPool:
             "outcome": outcome,
             "source": source,
             "key_id": key_id,
+            "key_name": (str(key_name).strip() or None) if key_name else None,
             "key_hint": key_hint or None,
         }
         self.request_log.appendleft(entry)
@@ -765,6 +866,12 @@ class AccountPool:
         return d.get("data")
 
     def credits(self, client, headers):
+        # 企业版分流：企业配额不在个人版资源接口里。官方按 `enterpriseId` 分流到
+        # `get-enterprise-user-usage`，两版路径同构。必须先判，否则企业账号会
+        # 查出一片空，界面显示成「没有积分」——用户会以为额度用光了。
+        if enterprise_id_of(headers):
+            return self._enterprise_credits(client, headers)
+
         packages = []
         now = datetime.fromtimestamp(self.clock(), CN)
         for page in range(1, 101):
@@ -783,6 +890,54 @@ class AccountPool:
             if not current:
                 break
         raise BillingError("积分包分页不完整，上次余额已保留")
+
+    def _enterprise_credits(self, client, headers):
+        """企业配额查询：单次请求，输出与个人版同形（多一个 unlimited 标记）。"""
+        response = client.post(ENTERPRISE_USAGE, headers=headers, json={})
+        if response.status_code != 200:
+            raise BillingError("企业配额服务请求失败", response.status_code)
+        try:
+            d = response.json()
+        except ValueError:
+            raise BillingError("企业配额服务返回格式异常")
+        code = d.get("code") if isinstance(d, dict) else None
+        if code != 0:
+            raise BillingError("上游未接受该操作，请检查账号或稍后重试", code=code)
+
+        usage = parse_enterprise_usage(d)
+        if usage is None:
+            raise BillingError("企业配额数据无法解析")
+
+        limit_num, used, reset_at = usage
+        if limit_num == -1:
+            # 不限量：数字字段置 None、资源列表为空。界面按 unlimited 分支展示，
+            # 不写积分快照（0/0 快照会把统计页误显示成余额为 0）。
+            return {
+                "remaining": None,
+                "capacity": None,
+                "used": None,
+                "packages": 0,
+                "unlimited": True,
+                "soonestExpireAt": None,
+                "resources": [],
+            }
+        remaining = max(0.0, limit_num - used)
+        expire_ms = int(reset_at.timestamp() * 1000) if reset_at else None
+        return {
+            "remaining": remaining,
+            "capacity": limit_num,
+            "used": used,
+            "packages": 1,
+            "unlimited": False,
+            "soonestExpireAt": expire_ms,
+            "resources": [{
+                "packageName": "企业配额",
+                "total": limit_num,
+                "remaining": remaining,
+                "used": used,
+                "expireAt": expire_ms,
+            }],
+        }
 
     def checkin_status(self, client, headers):
         try:
@@ -881,9 +1036,20 @@ class AccountPool:
         except (httpx.HTTPError, OSError, RuntimeError, KeyError, ValueError) as e:
             # 不把原始响应或 bearer 凭据带出去。
             result = {"id": aid, "ok": False, "claimed": False, "skip": "error",
+                      "state": "idle",
                       "message": "旅行操作失败：请检查登录凭据或网络"}
-            self.set_travel_state(aid, {"skip": "error", "ok": False, "claimed": False,
-                                        "message": str(e)[:120]})
+            # 存下的形状要与成功路径一致（含 state 与 claimed），否则界面在
+            # 下一轮读到这条记录时会缺少判据：`result_in_flight` 看 ok/claimed，
+            # 卡片看 state —— 少一个就显示成「状态未知」。
+            # 上一次的 recordId / arriveAt 一并保留：那次行程可能还在途中，
+            # 这次只是因为网络抖了一下没查到，不该把它忘掉。
+            prior = self.travel_state(aid)
+            stored = {k: prior.get(k) for k in ("recordId", "arriveAt", "locationName",
+                                                "claimedAt", "rewardCredit")
+                      if prior.get(k) not in (None, "", 0)}
+            stored.update({"skip": "error", "ok": False, "claimed": False,
+                           "state": "idle", "message": str(e)[:120]})
+            self.set_travel_state(aid, stored)
             return result
         self.set_travel_state(aid, result)
         return result
@@ -1116,9 +1282,12 @@ class AccountPool:
                 data = self.credits(client, headers)
                 # A successful balance lookup is proof of current authentication.
                 self.update(aid, **data, credits_updated=int(self.clock()), auth_invalid=False, last_error=checkin_error)
-                if data["remaining"] > 0 and action == "checkin":
+                # 不限量账号的 remaining 是 None（不是 0）：`None > 0` 会抛 TypeError，
+                # 所以必须先判 None。语义上「不限量」永远不会因额度耗尽进冷却。
+                remaining = data.get("remaining")
+                if remaining is not None and remaining > 0 and action == "checkin":
                     self.update(aid, cooldown_until=0)
-                return {"id": aid, "ok": True, "message": message, "remaining": data["remaining"]}
+                return {"id": aid, "ok": True, "message": message, "remaining": remaining}
         except BillingError as e:
             self.update(aid, last_error=str(e))
             if e.status in (401, 403):
@@ -1333,6 +1502,74 @@ class AccountPool:
             self.flush_usage()
         except Exception as exc:  # noqa: BLE001
             print(f"[reverse-proxy] 用量聚合落盘失败：{exc}", file=sys.stderr)
+
+        # 告警扫描：放在最后，且自己吞掉全部异常 —— 发信要 15 秒超时，
+        # 绝不能因为它打断上面那些更不能停的事。
+        try:
+            self.scan_alerts()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[reverse-proxy] 告警扫描失败：{exc}", file=sys.stderr)
+
+    def scan_alerts(self):
+        """扫描账号池，把**新出现**的告警发给管理员。
+
+        去重靠状态跃迁：告警指纹存进 `state.alerts.fired`，同一批只报一次；
+        恢复（指纹变了）之后再告急才会再报。另外有 6 小时重发窗口兜底，
+        防止状态在阈值边缘抖动导致反复发信。
+        """
+        cfg = alerts.load(self.store)
+        if not cfg.get("enabled"):
+            return
+        if not cfg.get("to") or not cfg.get("host"):
+            return
+        if alerts.in_quiet_hours(cfg):
+            return
+
+        now = datetime.fromtimestamp(self.clock(), CN)
+        with self.store.lock:
+            fired = dict((self.store.data.get("alerts") or {}).get("fired") or {})
+            last_sent = float((self.store.data.get("alerts") or {}).get("last_sent") or 0)
+
+        rows = self.rows(self.store.account_rows())
+        # 密钥级和池级告警需要额外两份数据。
+        # 都取「拿不到就传 None」的姿态：某个来源出错只该让对应的那类告警
+        # 不参与，不该让整轮扫描挂掉 —— 告警系统自己崩了，等于所有告警都没了。
+        try:
+            with self.store.lock:
+                raw_keys = dict((self.store.data.get("keys") or {}))
+            key_list = [keysvc.public_key(kid, item)
+                        for kid, item in raw_keys.items() if isinstance(item, dict)]
+        except Exception:  # noqa: BLE001
+            key_list = None
+        try:
+            # 「密钥连续被拒」只看最近的：30 天前的一串 401 不该让今天报警。
+            recent_logs = self.request_logs(200)
+        except Exception:  # noqa: BLE001
+            recent_logs = None
+        fresh = alerts.detect(rows, cfg, fired, now, keys=key_list, logs=recent_logs)
+        if not fresh:
+            return
+        if self.clock() - last_sent < alerts.REPEAT_WINDOW_SEC:
+            return
+
+        def record_error(message):
+            with self.store.lock:
+                bucket = self.store.data.setdefault("alerts", {})
+                bucket["last_error"] = message
+                bucket["last_error_at"] = int(self.clock())
+                self.store.save()
+
+        alerts.send_alerts_async(cfg, fresh, on_error=record_error)
+
+        with self.store.lock:
+            bucket = self.store.data.setdefault("alerts", {})
+            fired_now = dict(bucket.get("fired") or {})
+            for alert in fresh:
+                fired_now[alert["key"]] = alert["fingerprint"]
+            bucket["fired"] = fired_now
+            bucket["last_sent"] = int(self.clock())
+            bucket["last_kinds"] = [a["kind"] for a in fresh]
+            self.store.save()
 
 
 def request_affinity(headers, body):
@@ -1586,6 +1823,7 @@ class PoolMiddleware:
                                   cached_tokens=cached_used,
                                   upstream_model=upstream_model,
                                   key_id=(key or {}).get("id"),
+                                  key_name=(key or {}).get("name"),
                                   key_hint=(key or {}).get("hint"))
             if key and key.get("id"):
                 keysvc.touch_key(self.pool.store, key["id"], ip, tokens_used, credit_used)
