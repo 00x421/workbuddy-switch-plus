@@ -148,11 +148,13 @@ def _pool():
     class _Stub:
         clock = staticmethod(lambda: 1_800_000_000)
     stub = _Stub()
-    stub.billing = lambda client, headers, path, body=None: AccountPool.billing(
-        stub, client, headers, path, body
+    # realm 是 0.1.4 新增的可选参数（国际版 billing 域不同）。stub 用 *args 转交，
+    # 这样以后再给这几个方法加参数不需要回来改测试。
+    stub.billing = lambda client, headers, path, body=None, *a, **kw: AccountPool.billing(
+        stub, client, headers, path, body, *a, **kw
     )
-    stub._enterprise_credits = lambda client, headers: AccountPool._enterprise_credits(
-        stub, client, headers
+    stub._enterprise_credits = lambda client, headers, *a, **kw: AccountPool._enterprise_credits(
+        stub, client, headers, *a, **kw
     )
     return stub
 

@@ -546,35 +546,310 @@ def is_free_model(entry: dict) -> bool:
     return False
 
 
-def get_model_catalog() -> list[dict]:
-    """模型中心的完整清单：上下文长度、最大输出、思考档位、积分单价等。
+# ---------------------------------------------------------------------------
+# 模型目录：按版本、多来源
+# ---------------------------------------------------------------------------
+#
+# 三级来源，按「越靠前越权威」合并（同 id 时字段以靠前的为准）：
+#   1. /v3/config   —— 全量，两版都有（它没有 agents 白名单）
+#   2. 企业端点      —— 国内 /console/...；国际先 /v2/... 再 /console/...
+#   3. 本机产品配置  —— 兜底，离线也能列出模型名
+#
+# 为什么不能只用产品配置：那份文件只有国内版（实测 endpoint=www.workbuddy.cn），
+# 且装机快照与运行时缓存内容完全相同（date 差 6 秒、commit 一致），客户端不
+# 升级就永远不变。国际版账号拿它当清单，选中的模型在国际上游不存在。
 
-    与 `get_available_models()` 读的是**同一份**产品配置，只是不裁字段。
-    读不到配置时退回 `DEFAULT_MODELS` 的形状（只有 id，其余字段为 None），
-    这样界面至少还能列出模型名，而不是空白页。
+#: 两版的模型端点候选。顺序即尝试顺序。
+MODEL_ENDPOINT_PATHS = {
+    "global": (
+        "/v2/enterprises/personal/models",
+        "/console/enterprises/personal/models",
+        "/v3/config",
+    ),
+    "cn": (
+        "/console/enterprises/personal/models",
+        "/v3/config",
+    ),
+}
+
+#: 模型目录缓存 TTL。60 秒：够挡住界面连点刷新时的重复请求，
+#: 又不至于让「上游刚上线的模型」等到下次重启才可见。
+MODEL_CATALOG_TTL = 60.0
+
+_MODEL_CATALOG_CACHE: dict = {}
+
+
+def _realm_of_credential(cred) -> str:
+    """按订单/凭据判断该用哪一版端点。
+
+    凭据对象来自 `switch_store.CredentialManager`，`summary()` 里有 domain。
+    拿不到就判国内版 —— 与 `realm.realm_of` 同口径（显式 realm 优先，domain 兜底）。
     """
-    entries = _load_model_entries_from_workbuddy()
-    if entries:
-        return [_catalog_entry(entry) for entry in entries]
-    return [{
-        "id": mid, "name": mid, "vendor": "", "description": "",
-        "context_window": None, "context_window_options": [],
-        "max_input_tokens": None, "max_output_tokens": None, "max_allowed_size": None,
-        "credits": "", "credit_rate": None,
-        "supports_tool_call": True, "supports_images": False,
-        "supports_reasoning": False, "only_reasoning": False,
-        "reasoning_effort": None, "temperature": None, "tags": ["fallback"],
-    } for mid in DEFAULT_MODELS]
+    try:
+        summary = cred.summary() if cred is not None else {}
+    except Exception:  # noqa: BLE001
+        summary = {}
+    auth = {"realm": (summary or {}).get("realm"), "domain": (summary or {}).get("domain")}
+    try:
+        from admin import realm as realm_mod
+        return realm_mod.realm_of(auth)
+    except ImportError:
+        return "cn"
+
+
+def _envelope_of(resp):
+    """腾讯信封 → `(code, data)`。解析不出时用状态码当 code。"""
+    try:
+        env = resp.json()
+    except Exception:  # noqa: BLE001
+        return getattr(resp, "status_code", -1), None
+    if isinstance(env, dict) and "code" in env:
+        try:
+            return int(env.get("code", -1)), env.get("data")
+        except (TypeError, ValueError):
+            return -1, env.get("data")
+    return getattr(resp, "status_code", -1), env
+
+
+def _model_items(payload):
+    """从三种上游形态里挖出模型条目列表。
+
+    形态：`{"data": [...]}` / `{"data": {"models": [...]}}` / `{"models": [...]}`
+    以及 config 形态 `{"data": {"models": {"chat": [...]}}}`（罕见但要容忍）。
+    """
+    node = payload
+    if isinstance(node, dict):
+        node = node.get("data", node)
+    if isinstance(node, dict):
+        node = node.get("models", node)
+    if isinstance(node, dict):
+        # config 风格：按分类再包一层
+        for key in ("chat", "models", "list", "items"):
+            if isinstance(node.get(key), list):
+                return [m for m in node[key] if isinstance(m, dict)]
+        return []
+    if isinstance(node, list):
+        return [m for m in node if isinstance(m, dict)]
+    return []
+
+
+def _remote_model_entries(realm: str):
+    """从上游拉该版本的模型条目（同步）。
+
+    返回 `(entries, source_url)`；一个都拿不到时返回 `([], "")`。
+    走 `_proxy_kwargs()`：模型是「以该账号身份取」的，出口线路必须和对话一致，
+    否则同一个账号在两条路上露出两个来源。
+    """
+    cred = _cred()
+    headers = cred.get_headers()
+    headers["Accept"] = "application/json"
+    try:
+        from admin import realm as realm_mod
+        base = realm_mod.chat_base(realm)
+        paths = MODEL_ENDPOINT_PATHS.get(realm_mod.norm_realm(realm), MODEL_ENDPOINT_PATHS["cn"])
+    except ImportError:
+        base = BACKEND
+        paths = MODEL_ENDPOINT_PATHS["cn"]
+
+    seen: dict = {}
+    source = ""
+    with httpx.Client(timeout=20, **_proxy_kwargs()) as client:
+        for path in paths:
+            try:
+                resp = client.get(base + path, headers=headers)
+            except Exception:  # noqa: BLE001  单路失败不该打断整体
+                continue
+            code, data = _envelope_of(resp)
+            if code not in (0, 200):
+                continue
+            items = _model_items(data)
+            if not items:
+                continue
+            source = source or (base + path)
+            for item in items:
+                mid = item.get("id") or item.get("modelName") or item.get("name")
+                if not mid or str(mid) in seen:
+                    continue
+                seen[str(mid)] = item
+    return list(seen.values()), source
+
+
+def _normalize_remote_entry(entry: dict) -> dict:
+    """把上游端点的条目统一成产品配置那套 camelCase 名字。
+
+    为什么要统一：`_catalog_entry` 只认一套字段名。两个来源各写一套映射迟早漂，
+    所以在这里收敛，下游只面对一种形状。
+    """
+    ctx = entry.get("contextWindow")
+    if not isinstance(ctx, dict):
+        win = entry.get("context_length") or entry.get("contextWindowLength")
+        ctx = {"defaultLength": win} if win else {}
+    reasoning = entry.get("reasoning")
+    if not isinstance(reasoning, dict) and entry.get("reasoning_supported_efforts"):
+        reasoning = {
+            "effort": entry.get("reasoning_default_effort"),
+            "supportedEfforts": entry.get("reasoning_supported_efforts"),
+        }
+    return {
+        "id": entry.get("id") or entry.get("modelName") or entry.get("name"),
+        "name": entry.get("name") or entry.get("displayName") or entry.get("id"),
+        "vendor": entry.get("vendor") or entry.get("provider") or "",
+        "descriptionZh": entry.get("descriptionZh") or entry.get("description"),
+        "descriptionEn": entry.get("descriptionEn"),
+        "contextWindow": ctx,
+        "maxInputTokens": entry.get("maxInputTokens") or entry.get("max_input_tokens"),
+        "maxOutputTokens": entry.get("maxOutputTokens") or entry.get("max_output_tokens"),
+        "maxAllowedSize": entry.get("maxAllowedSize"),
+        "credits": entry.get("credits") or entry.get("credit") or "",
+        "supportsToolCall": bool(entry.get("supportsToolCall", entry.get("supports_tool_call"))),
+        "supportsImages": bool(entry.get("supportsImages", entry.get("supports_images"))),
+        "supportsReasoning": bool(entry.get("supportsReasoning", entry.get("supports_reasoning"))),
+        "onlyReasoning": bool(entry.get("onlyReasoning")),
+        "reasoning": reasoning,
+        "temperature": entry.get("temperature"),
+        "tags": [str(t) for t in (entry.get("tags") or []) if t],
+    }
+
+
+def get_model_catalog_for(realm: str = "cn", *, refresh: bool = False) -> list[dict]:
+    """该版本的完整模型清单（带 free 标注与来源）。
+
+    合并顺序决定「以谁为准」：`/v3/config` 等远端来源在前，本机产品配置在后
+    补缺。远端拿不到时才整份退回产品配置 —— 宁可给出旧清单，也不给空清单。
+    """
+    import time as _time
+    try:
+        from admin import realm as realm_mod
+        key = realm_mod.norm_realm(realm)
+    except ImportError:
+        key = "cn"
+
+    now = _time.time()
+    cached = _MODEL_CATALOG_CACHE.get(key)
+    if cached and not refresh and now - cached["at"] < MODEL_CATALOG_TTL:
+        return cached["entries"]
+
+    remote, source = ([], "")
+    try:
+        remote, source = _remote_model_entries(key)
+    except Exception:  # noqa: BLE001  没有单个账号可用时也不该炸
+        remote, source = ([], "")
+
+    merged: dict = {}
+    order: list = []
+    for item in remote:
+        norm = _normalize_remote_entry(item)
+        mid = norm.get("id")
+        if not mid or mid in merged or not _is_chat_model_entry(norm):
+            continue
+        merged[mid] = norm
+        order.append(mid)
+
+    # 本机产品配置补缺（同 id 不覆盖：远端是本版本上游给的，比本机那份权威）
+    local = _load_model_entries_from_workbuddy()
+    local_source = ""
+    if local:
+        try:
+            path = _find_workbuddy_product_json()
+            local_source = str(path) if path else ""
+        except Exception:  # noqa: BLE001
+            local_source = ""
+    for item in local:
+        mid = item.get("id")
+        if not mid or mid in merged:
+            continue
+        merged[mid] = item
+        order.append(mid)
+
+    if not order:
+        entries = [{
+            "id": mid, "name": mid, "vendor": "", "description": "",
+            "context_window": None, "context_window_options": [],
+            "max_input_tokens": None, "max_output_tokens": None, "max_allowed_size": None,
+            "credits": "", "credit_rate": None,
+            "supports_tool_call": True, "supports_images": False,
+            "supports_reasoning": False, "only_reasoning": False,
+            "reasoning_effort": None, "temperature": None, "tags": ["fallback"],
+            "free": False,
+        } for mid in DEFAULT_MODELS]
+        _MODEL_CATALOG_CACHE[key] = {"at": now, "entries": entries, "source": "", "local": ""}
+        return entries
+
+    entries = []
+    for mid in order:
+        item = _catalog_entry(merged[mid])
+        item["free"] = is_free_model(item)
+        entries.append(item)
+
+    _MODEL_CATALOG_CACHE[key] = {
+        "at": now, "entries": entries,
+        "source": source, "local": local_source,
+    }
+    return entries
+
+
+def model_catalog_source(realm: str = "cn") -> dict:
+    """模型清单的来源信息（给「为什么看不到某个模型」这类排查用）。
+
+    三个字段各自的用途：
+      · `remote`   —— 上游端点命中地址；空表示远端没取到，正在用本机配置
+      · `local`    —— 本机产品配置文件路径
+      · `realm`    —— 这份清单属于哪一版
+    """
+    try:
+        from admin import realm as realm_mod
+        key = realm_mod.norm_realm(realm)
+    except ImportError:
+        key = "cn"
+    cached = _MODEL_CATALOG_CACHE.get(key) or {}
+    return {
+        "realm": key,
+        "remote": cached.get("source", ""),
+        "local": cached.get("local", ""),
+        "count": len(cached.get("entries") or []),
+    }
+
+
+def _catalog_realm_or_cn(cred) -> str:
+    """拿得到凭据就按它的版本，拿不到就当国内版。
+
+    不抛：这个清单有个内置兜底（DEFAULT_MODELS），没有凭据也能给。
+    在这里 503 会让「模型目录」这个排查页在**最需要它的时候**完全不可用。
+    """
+    return _realm_of_credential(cred) if cred is not None else "cn"
+
+
+def get_model_catalog() -> list[dict]:
+    """模型中心的完整清单（**当前请求所用账号所属版本**）。
+
+    0.1.4 起不再是「读本机产品配置」一个来源：改成按版本向上游取
+    （见 `get_model_catalog_for`）。产品配置退到兜底位。
+
+    为什么不在这里换签名：`/v1/models`、密钥检查、模型中心三处都在调它，
+    而它们本来就跑在「已选定账号」的上下文里 —— 版本由凭据自己决定，
+    调用方不该关心。
+
+    没有凭据时**不抛**，退回内置清单（见 `_catalog_realm_or_cn`）。
+    """
+    try:
+        cred = _cred()
+    except HTTPException:
+        cred = None
+    entries = get_model_catalog_for(_catalog_realm_or_cn(cred))
+    return [{k: v for k, v in entry.items() if k != "free"} for entry in entries]
 
 
 def get_model_catalog_with_free() -> list[dict]:
-    """在 `get_model_catalog()` 的每条上补一个 `free` 布尔值。
+    """带 `free` 标注的模型清单（当前账号所属版本）。
 
-    为什么不直接在 `_catalog_entry` 里加：那个函数是"上游字段的直译层"，
-    加派生字段会让它同时承担两种职责，上游一改字段这里就要跟着改两次。
-    `free` 是**判据**，单独一层，改判据只动这一处。
+    `free` 是**判据**而不是上游字段的直译，所以不放进 `_catalog_entry`；
+    改判据只动 `is_free_model` 这一处。没有凭据时同样退回内置清单。
     """
-    return [{**entry, "free": is_free_model(entry)} for entry in get_model_catalog()]
+    try:
+        cred = _cred()
+    except HTTPException:
+        cred = None
+    return get_model_catalog_for(_catalog_realm_or_cn(cred))
 
 
 def get_available_models() -> list[str]:

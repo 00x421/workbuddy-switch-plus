@@ -22,6 +22,7 @@ from . import egress
 from . import groups
 from . import keysvc
 from . import mirror
+from . import realm as realm_mod
 from . import report
 from . import throttle
 from . import travel
@@ -31,6 +32,9 @@ from .iputil import client_ip_from_scope
 
 REQUEST_CREDENTIAL = ContextVar("pool_credential", default=None)
 CN = timezone(timedelta(hours=8))
+# billing 域基址随版本变（国际版是 www.workbuddy.ai），所以不再写死一个常量。
+# 保留这两个名字只为兼容既有调用点与测试：它们现在指向**国内版**，新代码
+# 一律用 realm.billing_url(path, realm)。
 BILLING = "https://www.codebuddy.cn/v2/billing/meter/"
 # 企业配额接口：企业账号不走个人版资源接口，官方按 `enterpriseId` 分流到这里；
 # 国内版与国际版路径同构（与桌面端 credits.rs 的 ENTERPRISE_USAGE_PATH 同值）。
@@ -1040,8 +1044,17 @@ class AccountPool:
         # 真实内存上限本来就是它，用 30 天去夹一个条数限制没有意义。
         return list(self.request_log)[: max(1, min(REQUEST_LOG_MEMORY_LIMIT, int(limit)))]
 
-    def billing(self, client, headers, path, body=None):
-        response = client.post(BILLING + path, headers=headers, json=body or {})
+    def billing(self, client, headers, path, body=None, realm=None):
+        """发一次 billing 请求。
+
+        `realm` 决定 base（国内 www.codebuddy.cn / 国际 www.workbuddy.ai）。
+        不传时按国内版——存量调用点全是国内版，这样升级不会改变既有行为。
+
+        **为什么不从 headers 里推 realm**：X-Domain 只在国内版注入，
+        国际版账号拿它推会落到国内版 base，是最隐蔽的一种错。
+        """
+        url = realm_mod.billing_url(path, realm) if realm else (BILLING + path)
+        response = client.post(url, headers=headers, json=body or {})
         if response.status_code != 200:
             raise BillingError("积分服务请求失败", response.status_code)
         try:
@@ -1052,17 +1065,17 @@ class AccountPool:
             raise BillingError("上游未接受该操作，请检查账号或稍后重试", code=d.get("code") if isinstance(d, dict) else None)
         return d.get("data")
 
-    def credits(self, client, headers):
+    def credits(self, client, headers, realm=None):
         # 企业版分流：企业配额不在个人版资源接口里。官方按 `enterpriseId` 分流到
         # `get-enterprise-user-usage`，两版路径同构。必须先判，否则企业账号会
         # 查出一片空，界面显示成「没有积分」——用户会以为额度用光了。
         if enterprise_id_of(headers):
-            return self._enterprise_credits(client, headers)
+            return self._enterprise_credits(client, headers, realm)
 
         packages = []
         now = datetime.fromtimestamp(self.clock(), CN)
         for page in range(1, 101):
-            d = self.billing(client, headers, "get-user-resource", {"PageNumber": page, "PageSize": 100, "ProductCode": "p_tcaca", "Status": [0, 3], "PackageEndTimeRangeBegin": now.strftime("%Y-%m-%d %H:%M:%S"), "PackageEndTimeRangeEnd": "2126-01-01 00:00:00"})
+            d = self.billing(client, headers, "get-user-resource", {"PageNumber": page, "PageSize": 100, "ProductCode": "p_tcaca", "Status": [0, 3], "PackageEndTimeRangeBegin": now.strftime("%Y-%m-%d %H:%M:%S"), "PackageEndTimeRangeEnd": "2126-01-01 00:00:00"}, realm)
             try:
                 data = d["Response"]["Data"]
                 current = data["Accounts"]
@@ -1078,9 +1091,11 @@ class AccountPool:
                 break
         raise BillingError("积分包分页不完整，上次余额已保留")
 
-    def _enterprise_credits(self, client, headers):
+    def _enterprise_credits(self, client, headers, realm=None):
         """企业配额查询：单次请求，输出与个人版同形（多一个 unlimited 标记）。"""
-        response = client.post(ENTERPRISE_USAGE, headers=headers, json={})
+        url = (realm_mod.billing_url("get-enterprise-user-usage", realm)
+               if realm else ENTERPRISE_USAGE)
+        response = client.post(url, headers=headers, json={})
         if response.status_code != 200:
             raise BillingError("企业配额服务请求失败", response.status_code)
         try:
@@ -1126,13 +1141,27 @@ class AccountPool:
             }],
         }
 
-    def checkin_status(self, client, headers):
-        try:
-            d = self.billing(client, headers, "checkin-activity-status")
-        except BillingError as e:
-            if e.status not in (404, 405):
-                raise
-            d = self.billing(client, headers, "checkin-status")
+    def checkin_status(self, client, headers, realm=None):
+        """查签到状态。路径候选来自 `realm.billing_paths`，逐个试。
+
+        两个历史路径（`checkin-activity-status` / `checkin-status`）并存是既有
+        事实，这里只准备把它们当数据：以后上游再换路径，改 `realm.BILLING_PATHS`
+        一处就够，不用回来改这里。
+        """
+        paths = realm_mod.billing_paths("checkin-status", realm) or (
+            "checkin-activity-status", "checkin-status")
+        last = None
+        d = None
+        for path in paths:
+            try:
+                d = self.billing(client, headers, path, realm=realm)
+                break
+            except BillingError as e:
+                last = e
+                if e.status not in (404, 405):
+                    raise
+        if d is None:
+            raise last or BillingError("签到状态接口不可用")
         if not isinstance(d, dict):
             raise BillingError("签到状态格式异常")
         def flag(snake, camel):
@@ -1440,33 +1469,40 @@ class AccountPool:
                 self.update(aid, token_refreshed=int(self.clock()), auth_invalid=False, cooldown_until=0, last_error=None)
                 return {"id": aid, "ok": True, "message": "登录凭据已刷新"}
             headers = manager.get_headers()
-            if "workbuddy.ai" in str(headers.get("X-Domain", "")).lower():
-                return {"id": aid, "ok": False, "message": "当前仅支持国内账号积分与签到"}
+            realm = realm_mod.realm_of(item)
             today = datetime.fromtimestamp(self.clock(), CN).strftime("%Y-%m-%d")
             with self.client_for(aid) as client:
                 message = "积分状态已更新"
                 checkin_error = None
-                try:
-                    ci = self.checkin_status(client, headers)
-                    if ci["checked"]:
-                        self.update(aid, checkin_date=today)
+                # 国际版没有签到体系：**先判断再决定发不发**。
+                # 以前这里是对所有账号都发 daily-checkin，国际版拿回业务错误码，
+                # 被记成一次失败 → consecutive_fails 累加 → 误报「账号连续失败」。
+                # 现在直接跳过，且 ok=True —— 「该版本没有这个功能」不是失败。
+                if not realm_mod.supports_checkin(realm):
                     if action == "checkin":
+                        message = realm_mod.unsupported_message("checkin", realm)
+                else:
+                    try:
+                        ci = self.checkin_status(client, headers, realm)
                         if ci["checked"]:
-                            message = "今日已签到，无需重复签到"
-                        elif not ci["active"]:
-                            message = "当前没有可参与的签到活动"
-                        else:
-                            self.billing(client, headers, "daily-checkin")
-                            ci = self.checkin_status(client, headers)
-                            if not ci["checked"]:
-                                raise BillingError("签到已提交，但上游尚未确认；请刷新状态")
                             self.update(aid, checkin_date=today)
-                            message = "签到成功"
-                except (BillingError, httpx.HTTPError) as e:
-                    if action == "checkin":
-                        raise
-                    checkin_error = "签到状态暂时无法查询"
-                data = self.credits(client, headers)
+                        if action == "checkin":
+                            if ci["checked"]:
+                                message = "今日已签到，无需重复签到"
+                            elif not ci["active"]:
+                                message = "当前没有可参与的签到活动"
+                            else:
+                                self.billing(client, headers, "daily-checkin", realm=realm)
+                                ci = self.checkin_status(client, headers, realm)
+                                if not ci["checked"]:
+                                    raise BillingError("签到已提交，但上游尚未确认；请刷新状态")
+                                self.update(aid, checkin_date=today)
+                                message = "签到成功"
+                    except (BillingError, httpx.HTTPError):
+                        if action == "checkin":
+                            raise
+                        checkin_error = "签到状态暂时无法查询"
+                data = self.credits(client, headers, realm)
                 # A successful balance lookup is proof of current authentication.
                 self.update(aid, **data, credits_updated=int(self.clock()), auth_invalid=False, last_error=checkin_error)
                 # 不限量账号的 remaining 是 None（不是 0）：`None > 0` 会抛 TypeError，

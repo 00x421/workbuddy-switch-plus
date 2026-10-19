@@ -35,6 +35,7 @@ from core import converter
 from core.workbuddy_atrest_crypto import decrypt_auth_field, encrypt_auth_field, is_encrypted_field
 
 from . import accountid
+from . import realm as realm_mod
 
 DEFAULT_DOMAIN = converter.DEFAULT_DOMAIN
 BACKEND = converter.BACKEND
@@ -776,13 +777,27 @@ class SwitchStore:
         records = {account_key(r): r for r in read_switch_accounts(self.accounts_path)}
         for aid, item in self.data["accounts"].items():
             rec = records.get(aid)
+            # 口径统一走 realm.realm_of（返回 cn / global）。原来这里用 variant_of
+            # 返回的是 cn / ai，同一个账号在「账号行」叫 ai、在「签到分派」叫
+            # global，前端得同时认两套拼写，迟早有一处漏。
+            row_realm = realm_mod.realm_of({
+                "realm": (rec or {}).get("realm") or "",
+                "domain": (rec or {}).get("domain") or "",
+                # 存量记录可能只写了 variant="ai"，没有 realm 字段。
+                "variant": (rec or {}).get("variant") or "",
+            })
             row = {
                 "id": aid,
                 "name": item["name"],
                 "enabled": item["enabled"],
                 "active": aid == self.data["active"],
                 "created": item["created"],
-                "realm": variant_of(rec) if rec else "cn",
+                "realm": row_realm,
+                # 这两个字段由 realm 模块统一给出，界面不自己推：
+                # 国际版（workbuddy.ai）没有签到体系，点签到必然拿错误码，
+                # 界面若照常显示「今日未确认签到」就会永远亮着一条消不掉的提示。
+                "realm_label": realm_mod.realm_label(row_realm),
+                "checkin_supported": realm_mod.supports_checkin(row_realm),
             }
             if rec is None:
                 row.update({"status": "missing", "expired": True, "expires_at": 0,

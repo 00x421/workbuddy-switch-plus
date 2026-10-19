@@ -451,7 +451,11 @@ export function AccountsPanel({ overview, reload, onAddAccount, onBatchScan }: {
                           <div className="flex items-center gap-1.5">
                             <span className="truncate font-medium">{a.name}</span>
                             {a.active ? <ToneBadge tone="muted">手动 / 测试</ToneBadge> : null}
-                            {a.realm === "ai" || a.realm === "global" ? <ToneBadge tone="muted">国际版</ToneBadge> : null}
+                            {/* 两版都标。只标国际版时，空白那一边到底是国内版还是
+                                没读到 realm，界面上看不出区别，排查会白绕一圈。 */}
+                            <ToneBadge tone="muted">
+                              {a.realm === "ai" || a.realm === "global" ? "国际版" : "国内版"}
+                            </ToneBadge>
                           </div>
                           <div className="truncate text-[11px] text-muted-foreground">{a.uid || a.nickname || "—"}</div>
                         </div>
@@ -459,7 +463,11 @@ export function AccountsPanel({ overview, reload, onAddAccount, onBatchScan }: {
                     </td>
                     <td className="px-3 py-2.5">
                       <ToneBadge tone={state.tone}>{state.label}</ToneBadge>
-                      <div className="mt-1 text-[11px] text-muted-foreground">{a.today_checked_in ? "今日已签到" : "今日未确认签到"}</div>
+                      <div className="mt-1 text-[11px] text-muted-foreground">
+                        {a.checkin_supported === false
+                          ? "该版本无签到"
+                          : a.today_checked_in ? "今日已签到" : "今日未确认签到"}
+                      </div>
                       {travelNote(a) ? <div className="text-[11px] text-muted-foreground">{travelNote(a)}</div> : null}
                       {activeNote(a) ? <div className="text-[11px] text-muted-foreground">{activeNote(a)}</div> : null}
                       {/* 失败原因单独按错误色显示：active_error 是活跃上报专用的，
@@ -492,7 +500,10 @@ export function AccountsPanel({ overview, reload, onAddAccount, onBatchScan }: {
                         {a.enabled ? (
                           <>
                             <Button variant="outline" size="sm" className="h-7 shrink-0 whitespace-nowrap px-2 text-xs" onClick={() => void runAccountAction(a, "status")}>查询积分</Button>
-                            <Button variant="outline" size="sm" className="h-7 shrink-0 whitespace-nowrap px-2 text-xs" onClick={() => void runAccountAction(a, "checkin")}>签到</Button>
+                            {/* 国际版没有签到体系：按钮点了必然失败，留着就是个陷阱。 */}
+                            {a.checkin_supported === false ? null : (
+                              <Button variant="outline" size="sm" className="h-7 shrink-0 whitespace-nowrap px-2 text-xs" onClick={() => void runAccountAction(a, "checkin")}>签到</Button>
+                            )}
                             <Button variant="outline" size="sm" className="h-7 shrink-0 whitespace-nowrap px-2 text-xs" title="按服务端状态机派一次猫猫旅行；已在旅途中会提示" onClick={() => void runAccountAction(a, "travel")}>派旅行</Button>
                             <Button variant="outline" size="sm" className="h-7 shrink-0 whitespace-nowrap px-2 text-xs" title="回查官方状态，到点则领奖" onClick={() => void runAccountAction(a, "travel-claim")}>领奖</Button>
                             <Button data-action="active" variant="outline" size="sm" className="h-7 shrink-0 whitespace-nowrap px-2 text-xs" title="向上游发一条 chat_request_send 事件点亮 growth 连登；每号每天一轮" onClick={() => void runAccountAction(a, "active")}>活跃</Button>

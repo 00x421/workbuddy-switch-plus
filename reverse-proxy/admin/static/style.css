@@ -1094,6 +1094,12 @@ dialog::backdrop { background: rgba(3, 7, 18, .68); backdrop-filter: blur(3px); 
   color: #7fbdf0;
 }
 
+/* 国内版标签刻意更低调：它占绝大多数，抢眼会让整张表看起来很吵。 */
+.mini-realm-cn {
+  background: rgba(148, 163, 184, .16);
+  color: var(--muted);
+}
+
 /* ── 批量扫码 ──────────────────────────────────────────────────────── */
 .toolbar-actions { display: flex; align-items: center; gap: 8px; }
 

@@ -67,6 +67,10 @@ def test_credit_rate_parsing(raw, expected):
 # --------------------------------------------------------------- 目录形状
 
 def test_catalog_falls_back_to_default_models(monkeypatch):
+    # 兜底的前提是「远端与本机都没条目」。远端不断掉的话，这机器上真能取到
+    # 上游清单，DEFAULT_MODELS 那条分支根本走不到。
+    monkeypatch.setattr(converter, "_remote_model_entries", lambda realm: ([], ""))
+    converter._MODEL_CATALOG_CACHE.clear()
     monkeypatch.setattr(converter, "_load_model_entries_from_workbuddy", lambda: [])
     catalog = converter.get_model_catalog()
     assert [m["id"] for m in catalog] == converter.DEFAULT_MODELS
@@ -172,6 +176,10 @@ def test_real_machine_catalog_has_v41_flash(monkeypatch):
     """真机：WorkBuddy 里选得到的模型，模型中心就必须看得见、且带规格。"""
     monkeypatch.delenv("ACC_PRODUCT_CONFIG_PATH", raising=False)
     monkeypatch.delenv("WORKBUDDY_DATA_DIR", raising=False)
+    # 这条用例验的是「本机产品配置里的模型进得来、且带规格」。
+    # 远端那一路在这里没有确定性（可能拿到、也可能没账号），按死它。
+    monkeypatch.setattr(converter, "_remote_model_entries", lambda realm: ([], ""))
+    converter._MODEL_CATALOG_CACHE.clear()
 
     catalog = {m["id"]: m for m in converter.get_model_catalog()}
     assert "deepseek-v4.1-flash" in catalog
@@ -183,8 +191,12 @@ def test_real_machine_catalog_has_v41_flash(monkeypatch):
     # 真正表达"这个模型能塞多少上下文"的字段是 maxInputTokens → max_input_tokens。
     assert entry["max_input_tokens"]
     assert entry["credit_rate"] is not None
-    # 模型中心的清单必须与 /v1/models 完全一致（两边判据是同一个）
-    assert set(catalog) == set(converter.get_available_models())
+    # 0.1.4 起清单按版本向上游取，可能比本机产品配置多几个模型——
+    # 那是设计要的（用户报过「国际版没有 DeepSeek」）。这里只保证产品配置
+    # 里的每一个模型**都还在**：兜底不回退才是要紧的那条线。
+    local = set(converter.get_available_models())
+    missing = local - set(catalog)
+    assert not missing, f"产品配置里有、模型中心却丢了：{sorted(missing)}"
 
 
 if __name__ == "__main__":

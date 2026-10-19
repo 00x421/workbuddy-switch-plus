@@ -237,12 +237,20 @@ class Store:
                 # 界面靠它区分「国内版」与「国际版」，也靠它决定要不要显示
                 # 地区注册入口——国际版没注册地区的号聊天会报 14017。
                 account_realm = realm_mod.realm_of(doc.get("auth") or {})
+                # realm_label / checkin_supported 都由 realm 模块给出，界面不自己推。
+                # 国际版（workbuddy.ai）没有签到体系：点签到必然拿错误码，界面若
+                # 照常显示「今日未确认签到」就会永远亮着一条消不掉的提示。
                 row.update({"nickname": str(account.get("nickname") or ""), "uid": str(account.get("uid") or ""), "expires_at": expiry, "expired": expiry < time.time() * 1000, "refresh_available": bool(doc["auth"].get("refreshToken")), "status": "ready",
                             "is_enterprise": bool(enterprise_id), "enterprise_id": enterprise_id,
-                            "realm": account_realm})
+                            "realm": account_realm,
+                            "realm_label": realm_mod.realm_label(account_realm),
+                            "checkin_supported": realm_mod.supports_checkin(account_realm)})
             except (ValueError, OSError, KeyError):
+                # 读不出来的记录仍然要有一份完整形状：前端少字段会渲染成 "undefined"。
                 row.update({"status": "invalid", "expired": True, "expires_at": 0, "refresh_available": False,
-                            "is_enterprise": False, "enterprise_id": "", "realm": realm_mod.CN})
+                            "is_enterprise": False, "enterprise_id": "", "realm": realm_mod.CN,
+                            "realm_label": realm_mod.realm_label(realm_mod.CN),
+                            "checkin_supported": realm_mod.supports_checkin(realm_mod.CN)})
             result.append(row)
         return result
 

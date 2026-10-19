@@ -40,11 +40,17 @@ def test_credits_text_is_not_a_judge():
 
 
 def test_catalog_with_free_annotates_every_entry(monkeypatch):
+    # 远端那一路必须一起按死，否则这机器上有真凭据，真去上游取一次 43 个模型，
+    # 覆盖掉的只是「本机配置补缺」那条支路。
+    monkeypatch.setattr(converter, "_remote_model_entries", lambda realm: ([], ""))
+    converter._MODEL_CATALOG_CACHE.clear()
     monkeypatch.setattr(converter, "_load_model_entries_from_workbuddy", lambda: [
         {"id": "a", "vendor": "f", "tags": ["限时免费"]},
         {"id": "b", "vendor": "f"},
     ])
-    rows = converter.get_model_catalog_with_free()
+    # 直接按版本取，不走 get_model_catalog_with_free()：那一层要先解凭据，
+    # 而免费标注跟「这次是哪个账号」无关。
+    rows = converter.get_model_catalog_for("cn")
     assert [r["id"] for r in rows] == ["a", "b"]
     assert rows[0]["free"] is True
     assert rows[1]["free"] is False
@@ -53,8 +59,10 @@ def test_catalog_with_free_annotates_every_entry(monkeypatch):
 
 
 def test_catalog_with_free_on_fallback(monkeypatch):
+    monkeypatch.setattr(converter, "_remote_model_entries", lambda realm: ([], ""))
+    converter._MODEL_CATALOG_CACHE.clear()
     monkeypatch.setattr(converter, "_load_model_entries_from_workbuddy", lambda: [])
-    rows = converter.get_model_catalog_with_free()
+    rows = converter.get_model_catalog_for("cn")
     # 兜底条目的 tags 是 ["fallback"]，不是免费
     assert all(r["free"] is False for r in rows)
     assert all(r["tags"] == ["fallback"] for r in rows)

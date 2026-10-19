@@ -70,7 +70,12 @@ class HotReloadSuite(unittest.IsolatedAsyncioTestCase):
         rows = await self.rows()
         self.assertEqual(set(rows), {"u1", "u2", "u3"})
         self.assertEqual(rows["u3"]["pool_state"], "available")
-        self.assertEqual(rows["u3"]["realm"], "ai")  # variant=ai → realm=ai
+        # 账号行里的 realm 现在统一走 realm.realm_of，返回 cn / global。
+        # 这里原来是 "ai"（旧口径 variant_of 的返回值）——同一个账号在「账号行」
+        # 叫 ai、在「签到与积分分派」叫 global，前端得同时认两套拼写，迟早漏一处。
+        self.assertEqual(rows["u3"]["realm"], "global")  # variant=ai → realm=global
+        # 国际版没有签到体系，界面靠这个字段把签到按钮标成「该版本无签到」。
+        self.assertEqual(rows["u3"]["checkin_supported"], False)
 
     async def test_removed_account_and_its_state_are_dropped(self):
         # 给 u2 造一些历史状态与亲和绑定，删除后应当一并回收

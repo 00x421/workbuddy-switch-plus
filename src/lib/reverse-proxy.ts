@@ -176,6 +176,10 @@ export type RpAccount = {
   nickname?: string; uid?: string; status?: string;
   pool_state?: string; remaining?: number | null; credits_updated?: number;
   credits_stale?: boolean; today_checked_in?: boolean; cooldown_until?: number;
+  /** 这一版有没有签到体系。国际版（workbuddy.ai）没有，界面要写「该版本无签到」。 */
+  checkin_supported?: boolean;
+  /** 版本的中文名（国内版 / 国际版），由服务端给出，界面不自己推。 */
+  realm_label?: string;
   last_error?: string | null; expires_at?: number; expired?: boolean;
   refresh_available?: boolean; request_count?: number;
   /**
