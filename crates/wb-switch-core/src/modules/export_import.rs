@@ -107,8 +107,9 @@ fn merge_import_record(accounts: &mut Vec<Value>, item: &Value) -> MergeOutcome 
             // id）：优先保留本地 id；本地也是无 id 的历史脏数据时补一个。
             if account::get_str(&replaced, "id").is_none() {
                 replaced["id"] = account::get_str(existing, "id")
+                    .filter(|id| !id.trim().is_empty())
                     .map(Value::String)
-                    .unwrap_or_else(|| Value::String(uuid::Uuid::new_v4().to_string()));
+                    .unwrap_or_else(|| Value::String(account::account_id_or_random(&replaced)));
             }
             *existing = replaced;
             return MergeOutcome::Overwritten;
@@ -118,7 +119,7 @@ fn merge_import_record(accounts: &mut Vec<Value>, item: &Value) -> MergeOutcome 
     // 反复追加副本（issue #111）。
     let mut appended = item.clone();
     if account::get_str(&appended, "id").is_none() {
-        appended["id"] = Value::String(uuid::Uuid::new_v4().to_string());
+        appended["id"] = Value::String(account::account_id_or_random(&appended));
     }
     accounts.push(appended);
     MergeOutcome::Appended

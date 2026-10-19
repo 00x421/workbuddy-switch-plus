@@ -9,7 +9,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
-uuid = { version = "1", features = ["v4"] }
+# v5：账号本地 id 按 uid 确定性派生（uuid5），与反代服务 admin/accountid.py 对齐。
+# 随机 v4 只留给会话/临时文件等一次性标识；账号 id 若继续随机，两个程序写同一份
+# accounts.json 时必然分叉成两条重复记录（issue：反代登录的号桌面端切不过去）。
+uuid = { version = "1", features = ["v4", "v5"] }
 dirs = "5"
 chrono = "0.4"
 # backup：会话同步前用 SQLite 在线备份 API 生成一致快照，不直接 cp 活动库。

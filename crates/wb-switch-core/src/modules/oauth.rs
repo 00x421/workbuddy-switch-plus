@@ -224,7 +224,9 @@ pub async fn oauth_poll(login_id: &str) -> Value {
     };
 
     let account = json!({
-        "id": uuid::Uuid::new_v4().to_string(),
+        // 按 uid 确定性派生，与反代服务 admin/accountid.py 同一算法：同一个账号不论
+        // 从桌面端还是从反代服务登录，本地 id 都是同一个，不会写成两条互不相认的记录。
+        "id": account::derive_account_id(uid.as_deref().unwrap_or_default()),
         "uid": uid,
         "nickname": nickname,
         "email": email,

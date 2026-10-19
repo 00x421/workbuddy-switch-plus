@@ -7,7 +7,7 @@
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
-use crate::modules::account::{get_str, secret_value};
+use crate::modules::account::{self, get_str, secret_value};
 use crate::modules::config::{atomic_write, backup_dir, now_ms, utc_iso};
 use crate::modules::variant::WbVariant;
 
@@ -330,7 +330,9 @@ fn imported_account_from_root(root: Value, variant: WbVariant) -> Option<Value> 
     access_token.as_ref()?;
 
     Some(json!({
-        "id": uuid::Uuid::new_v4().to_string(),
+        // 从本机 WorkBuddy 认证文件采集时同样按 uid 派生，保证与 OAuth 扫码、
+        // 反代服务登录三路写出的本地 id 完全一致（见 account::derive_account_id）。
+        "id": account::derive_account_id(uid.as_deref().unwrap_or_default()),
         "uid": uid,
         "nickname": nickname,
         "email": email,

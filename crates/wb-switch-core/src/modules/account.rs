@@ -10,6 +10,59 @@ use std::path::Path;
 use crate::modules::config::{accounts_file, atomic_write, now_ms};
 use crate::modules::variant::WbVariant;
 
+/// 账号本地 id 的派生命名空间。
+///
+/// 必须与反代服务 `reverse-proxy/admin/accountid.py` 的 `NAMESPACE` 逐字节相同：
+/// 两个程序写同一份 `accounts.json`，id 算法任何一处不同都会分叉成两条记录。
+pub const ACCOUNT_ID_NAMESPACE: &str = "6f9619ff-8b86-d011-b42d-00c04fc964ff";
+
+/// 按 uid 派生稳定的本地账号 id（uuid5）。
+///
+/// 为什么是确定性派生而不是随机 v4：反代服务绕过桌面端直接把账号写进
+/// `accounts.json`（`switch_store.save_browser_account`），如果两边各自随机生成 id，
+/// 同一个账号会被写成两条互不相认的记录 —— 桌面端 `find_account` 只认 id 或 uid，
+/// 拿不到 id 的那条就在切换时报「账号不存在」，要等桌面端下次刷新 token 走
+/// `upsert_account_in` 补齐 id 才恢复（用户报的「等一天才好」）。
+///
+/// **已在库里的 id 一律不动**：早期版本用随机 v4 生成，重新派生会让老记录的 id 变化，
+/// 切换与会话绑定随之失效。本函数只用于「缺 id 时补一个」的路径。
+///
+/// 空 uid 返回空串，由调用方决定兜底（不在这里替它们选随机）。
+pub fn derive_account_id(uid: &str) -> String {
+    let value = uid.trim();
+    if value.is_empty() {
+        return String::new();
+    }
+    let Ok(namespace) = uuid::Uuid::parse_str(ACCOUNT_ID_NAMESPACE) else {
+        return String::new();
+    };
+    uuid::Uuid::new_v5(&namespace, value.as_bytes()).to_string()
+}
+
+/// 记录应持有的 id：已有的原样返回，缺失时按 uid 派生（空串表示派不出）。
+pub fn account_id_or_derive(acc: &Value) -> String {
+    if let Some(id) = get_str(acc, "id") {
+        if !id.trim().is_empty() {
+            return id;
+        }
+    }
+    derive_account_id(&get_str(acc, "uid").unwrap_or_default())
+}
+
+/// 兜底版：派得出就用派生的，派不出（既无 uid 也无 id）才退回随机 v4。
+///
+/// 账号库的硬性不变量是「任何记录都必须有 id」（删除按 id、列表 key、导出选择都依赖它），
+/// 连 uid 都没有的脏数据也必须先拿到一个 id 才能被后续按 id 覆盖，否则每次刷新回写都会
+/// 追加一条副本（issue #111）。所以这里的兜底不能省。随机值只在「无法与任何已知账号
+/// 关联」时出现，不会与反代服务产出的确定性 id 冲突。
+pub fn account_id_or_random(acc: &Value) -> String {
+    let derived = account_id_or_derive(acc);
+    if !derived.is_empty() {
+        return derived;
+    }
+    uuid::Uuid::new_v4().to_string()
+}
+
 /// 判断字段是否为 WorkBuddy 5.6 加密信封对象（`{$wbEncrypted, envelope}`）。
 ///
 /// 导出导入预览与采集共用同一判定，不要在调用方复制实现。
@@ -266,7 +319,7 @@ pub fn upsert_collected_account(accounts: &mut Vec<Value>, mut collected: Value)
             let mut preserved = existing.clone();
             preserved["id"] = get_str(&collected, "id")
                 .map(Value::String)
-                .unwrap_or_else(|| Value::String(uuid::Uuid::new_v4().to_string()));
+                .unwrap_or_else(|| Value::String(account_id_or_random(&preserved)));
             accounts[first_index] = preserved.clone();
             return preserved;
         }
@@ -291,7 +344,7 @@ pub fn upsert_collected_account(accounts: &mut Vec<Value>, mut collected: Value)
             collected["id"] = Value::String(existing_id);
         } else if get_str(&collected, "id").is_none() {
             // 同 uid 的历史记录也可能缺 id；命中覆盖分支时同样维持账号库不变量。
-            collected["id"] = Value::String(uuid::Uuid::new_v4().to_string());
+            collected["id"] = Value::String(account_id_or_random(&collected));
         }
         if get_str(&collected, "uid").is_none() {
             if let Some(existing_uid) = existing.get("uid").cloned() {
@@ -310,7 +363,7 @@ pub fn upsert_collected_account(accounts: &mut Vec<Value>, mut collected: Value)
     } else {
         // 追加分支同样保证入库记录带 id（账号库不允许无 id 记录）。
         if get_str(&collected, "id").is_none() {
-            collected["id"] = Value::String(uuid::Uuid::new_v4().to_string());
+            collected["id"] = Value::String(account_id_or_random(&collected));
         }
         accounts.push(collected.clone());
     }
@@ -445,7 +498,7 @@ fn upsert_account_in(accounts: &mut Vec<Value>, updated: &Value) {
             }
         }
         if get_str(&next, "id").is_none() {
-            next["id"] = Value::String(uuid::Uuid::new_v4().to_string());
+            next["id"] = Value::String(account_id_or_random(&next));
         }
         accounts[index] = next;
         return;
@@ -453,7 +506,7 @@ fn upsert_account_in(accounts: &mut Vec<Value>, updated: &Value) {
 
     let mut appended = updated.clone();
     if get_str(&appended, "id").is_none() {
-        appended["id"] = Value::String(uuid::Uuid::new_v4().to_string());
+        appended["id"] = Value::String(account_id_or_random(&appended));
     }
     accounts.push(appended);
 }
@@ -521,6 +574,64 @@ pub fn import_local(variant: WbVariant) -> Result<Value, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 账号 id 派生必须与反代服务算出的值逐字相同。
+    ///
+    /// 黄金值同时硬编码在 `reverse-proxy/tests/test_accountid.py` 的 `GOLDEN` 里。
+    /// 改了命名空间常量或换了算法，两边测试会同时红 —— 那是故意的：一旦分叉，
+    /// 同一个账号在两个程序里就是两条互不相认的记录。
+    #[test]
+    fn derived_account_id_is_stable_for_same_uid() {
+        assert_eq!(
+            derive_account_id("ab43eca9-488c-42a4-9210-a536065e1f3d"),
+            "e3015225-739a-5167-8508-21c1820eef13"
+        );
+        assert_eq!(
+            derive_account_id("abc"),
+            "2cdebaf4-f3f5-57fc-845c-d8f7a0435c8b"
+        );
+        // 同一 uid 反复派生结果不变（跨进程、跨机器都一样）。
+        let first = derive_account_id("7795e651-6e38-44d8-977c-dfc78672314c");
+        for _ in 0..5 {
+            assert_eq!(derive_account_id("7795e651-6e38-44d8-977c-dfc78672314c"), first);
+        }
+    }
+
+    #[test]
+    fn derive_account_id_trims_and_tolerates_empty() {
+        assert_eq!(derive_account_id("  abc  "), derive_account_id("abc"));
+        assert_eq!(derive_account_id(""), "");
+        assert_eq!(derive_account_id("   "), "");
+    }
+
+    /// 库里已有的 id 一律不动 —— 早期随机 v4 生成的 id 仍是合法 id，
+    /// 换成派生值会让那条记录的切换与会话绑定一起失效。
+    #[test]
+    fn account_id_or_derive_keeps_existing_and_fills_missing() {
+        let existing = json!({"uid": "abc", "id": "8e1a2c64-0d39-4d14-91f7-7a1fa6a24e2b"});
+        assert_eq!(
+            account_id_or_derive(&existing),
+            "8e1a2c64-0d39-4d14-91f7-7a1fa6a24e2b"
+        );
+
+        let missing = json!({"uid": "abc"});
+        assert_eq!(account_id_or_derive(&missing), derive_account_id("abc"));
+
+        let blank = json!({"uid": "abc", "id": "  "});
+        assert_eq!(account_id_or_derive(&blank), derive_account_id("abc"));
+
+        // 既无 id 也无 uid：派不出，返回空串由调用方兜底。
+        assert_eq!(account_id_or_derive(&json!({})), "");
+    }
+
+    /// 反代服务写进来的记录（只有 uid、没有 id）被采集覆盖时必须补上同一个 id，
+    /// 而不是生成随机值 —— 这正是用户报的「反代登录的号桌面端切不过去」。
+    #[test]
+    fn collected_record_without_id_gets_derived_id_matching_proxy() {
+        let collected = json!({"uid": "abc", "access_token": "t"});
+        let filled = account_id_or_derive(&collected);
+        assert_eq!(filled, "2cdebaf4-f3f5-57fc-845c-d8f7a0435c8b");
+    }
 
     /// 回归 issue #94：信封凭据要能被识别并给出可读错误，明文/缺字段不误报。
     #[test]

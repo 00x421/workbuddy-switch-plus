@@ -34,6 +34,8 @@ from fastapi import HTTPException
 from core import converter
 from core.workbuddy_atrest_crypto import decrypt_auth_field, encrypt_auth_field, is_encrypted_field
 
+from . import accountid
+
 DEFAULT_DOMAIN = converter.DEFAULT_DOMAIN
 BACKEND = converter.BACKEND
 
@@ -131,7 +133,13 @@ def read_switch_accounts_checked(path: Path) -> tuple[list[dict], bool]:
                 break
     if not isinstance(raw, list):
         return [], False
-    return [r for r in raw if isinstance(r, dict)], True
+    records = [r for r in raw if isinstance(r, dict)]
+    # 补 id：桌面端切换账号按 id（或 uid）查号，缺 id 的记录在桌面端「看得到但切不过去」。
+    # 这里只补内存副本，不写回文件 —— 文件归桌面端所有，反代服务擅自整份重写会
+    # 丢掉它自己的字段（createdAt / profile_raw / 会话绑定等）。
+    for rec in records:
+        accountid.ensure_account_id(rec)
+    return records, True
 
 
 def variant_of(rec: dict) -> str:
@@ -867,11 +875,19 @@ class SwitchStore:
         }
         for i, rec in enumerate(records):
             if account_key(rec) == uid:
-                records[i] = {**rec, **entry}
+                # 命中已有记录时沿用它的 id（桌面端早年生成的随机 v4 也是合法 id，
+                # 换成派生值会让那条记录的切换与会话绑定一起失效）。
+                records[i] = {**rec, **entry, "id": accountid.ensure_account_id(rec)}
                 break
         else:
+            # 新记录必须带 id：桌面端 find_account 只认 id 或 uid，缺 id 的记录在
+            # 切换时报「账号不存在」，要等桌面端下次刷新 token 补 id 才恢复。
+            entry["id"] = accountid.derive_account_id(uid)
             records.append(entry)
+        local_id = accountid.ensure_account_id(entry) or uid
         write_json(self.accounts_path, records)
         self.sync_from_switch()
         self.save()
-        return {"account_id": uid, "updated": True}
+        # 回传本地 id 而不是 uid：桌面端拿这个值去 find_account，uid 虽然也能命中，
+        # 但界面上的账号列表、会话绑定用的都是本地 id，两套标识混用迟早出错。
+        return {"account_id": local_id, "updated": True}
