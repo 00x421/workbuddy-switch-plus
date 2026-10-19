@@ -320,7 +320,7 @@ def test_send_async_no_thread_when_nothing_to_send():
 def test_alert_kinds_table_is_complete():
     assert set(alerts.ALERT_KINDS) == {
         "banned", "frozen", "credits",
-        "upstream_disabled", "quota", "pool_empty", "pool_thin",
+        "upstream_disabled", "account_failing", "quota", "pool_empty", "pool_thin",
         "stale", "refresh_failed", "key_rejected",
     }
     # 每个类型都要有中文标题 —— 邮件里出现英文 key 说明漏配了。

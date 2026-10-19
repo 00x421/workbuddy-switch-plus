@@ -169,6 +169,20 @@ export type RpAccount = {
   travel_reward?: number | string | null;
   travel_skip?: string | null;
   /**
+   * 账号级流量整形。三项并存于同一个对象里（服务端 `throttle.limits_of` 的形状），
+   * 缺省时分别读作 `1 / 0 / 0`，即「等权、不限并发、不限速」。
+   *
+   * `weight: 0` 有独立语义——不参与自动轮转，但手动指定仍可用。别把它
+   * 和缺省混为一谈：缺省是 1。
+   */
+  weight?: number;
+  max_concurrency?: number;
+  min_interval?: number;
+  /** 此刻正在打到这个号上的请求数。用来判断「是我设太小了还是号真的卡了」。 */
+  inflight?: number;
+  /** 上一次请求的时间戳（秒）。最小间隔是从它开始算的。 */
+  last_request?: number;
+  /**
    * 最近一次「对话活跃上报」被证明生效的日期（YYYY-MM-DD）。没生效过为 null。
    *
    * 注意这里的口径：只有回读到连登天数 > 0 才写它。上报拿到 200 但事件被上游
@@ -262,6 +276,24 @@ export type RpPool = {
   wb2api_base?: string;
   /** 上游要求 Bearer 鉴权时填它的 API key；留空表示上游未设鉴权。 */
   wb2api_key?: string;
+  /**
+   * 账号级流量整形的默认值 —— 新建账号时抄一份过去。
+   *
+   * 缺省读作 `1 / 0 / 0`。`default_weight` 服务端**不接受 0**：
+   * 权重 0 的语义是「这个号不参与自动轮转」，那是单个账号的意图，
+   * 不该成为所有新加账号的初值（加完发现不工作，且界面不会报错）。
+   */
+  default_weight?: number;
+  default_max_concurrency?: number;
+  default_min_interval?: number;
+  /**
+   * 全池总并发上限：同一时刻打到上游的**总**请求数，0 = 不限制。
+   *
+   * 与 `default_max_concurrency` 不是一回事：后者是「每个号自己的上限」，
+   * 20 个号各配 3 并发时，单号看全都合规，上游看到的却是 60 个请求同时到。
+   * 这一项是给整体加一道闸，超出部分排队而不是失败。
+   */
+  max_total_concurrency?: number;
   /**
    * 最近一次读上游 `/status` 失败的原因；空串 = 没问题。
    *
@@ -579,6 +611,16 @@ export const rp = {
   poolAction: (action: "status" | "checkin" | "travel" | "travel-claim" | "active") =>
     request<{ results: { id: string; ok: boolean; message: string }[] }>(`pool/actions/${action}`, { method: "POST" }),
   poolSettings: (body: RpPool) => request<{ ok: boolean; pool: RpPool }>("pool/settings", { method: "PATCH", body }),
+  /**
+   * 账号级流量整形。**PUT 是整体语义**，三项都会被写。
+   *
+   * 服务端对「键缺失」的解读是「不动这一项」，所以只改权重时理论上可以
+   * 只发 weight；但界面里三个框都摆着，用户看到什么就该存成什么，
+   * 所以这里总是三项齐发。`0` 是合法值（不限制/不限速），调用方别把它过滤掉。
+   */
+  setAccountLimits: (id: string, limits: { weight: number; max_concurrency: number; min_interval: number }) =>
+    request<{ ok: boolean; weight: number; max_concurrency: number; min_interval: number }>(
+      `accounts/${id}/limits`, { method: "PUT", body: limits }),
   /** 任务流水。`kind` 交给服务端过滤：流水是落盘的，本地过滤会漏掉被挤出这一页的记录。 */
   checkinLogs: (limit = 200, kind?: string) =>
     request<RpCheckinLog[]>(`pool/checkin-logs?limit=${limit}${kind ? `&kind=${encodeURIComponent(kind)}` : ""}`),

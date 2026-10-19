@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { rp, POOL_STATE_LABELS, ROUTING_LABELS, type RpAccount, type RpCheckinLog, type RpOverview } from "@/lib/reverse-proxy";
 import { Banner, Empty, Field, PanelHeader, StatCard, ToneBadge, fmtNum, fmtTime } from "./rp-shared";
 import { ConfirmDialog, useConfirm } from "./confirm-dialog";
+import { AccountLimitsDialog } from "./account-limits-dialog";
 
 const FILTERS = [
   ["all", "全部状态"],
@@ -19,6 +20,24 @@ const FILTERS = [
   ["exhausted", "积分耗尽"],
   ["invalid", "凭据异常"],
 ] as const;
+
+/**
+ * 行内限速角标：只有**真的偏离默认**才显示。
+ *
+ * 全池都设成同一个值时不该每行都挂个「5x」—— 那样等于没有信息量，
+ * 而「这一行和别的行不一样」才是有用的信号。
+ * 权重 0 单独写成「停转」：它是语义（不参与轮转），不是数量。
+ */
+function limitsBadge(a: RpAccount): string {
+  const weight = Number(a.weight ?? 1);
+  const concurrency = Number(a.max_concurrency ?? 0);
+  const gap = Number(a.min_interval ?? 0);
+  const parts: string[] = [];
+  if (weight !== 1) parts.push(weight === 0 ? "停转" : `${weight}x`);
+  if (concurrency > 0) parts.push(`≤${concurrency}`);
+  if (gap > 0) parts.push(`${gap}s`);
+  return parts.join(" ");
+}
 
 /** 与服务端 travel_label 一一对应（口径同桌面端 travel.rs 的 display_label）。 */
 const TRAVEL_LABELS: Record<string, string> = {
@@ -203,8 +222,17 @@ export function AccountsPanel({ overview, reload, onAddAccount }: {
     wb2api_key: pool.wb2api_key ?? "",
     spread: Boolean(pool.spread),
     spread_minutes: pool.spread_minutes ?? 30,
+    // 流量整形默认值。用 ?? 而不是 || —— 0 是有效取值（不限制/不限速），
+    // 用 || 会把 0 变成另一个数的分支，用户清成 0 后一刷新又跳回来。
+    default_weight: pool.default_weight ?? 1,
+    default_max_concurrency: pool.default_max_concurrency ?? 0,
+    default_min_interval: pool.default_min_interval ?? 0,
+    // 全池总量闸门，0 = 不限制（缺省即不限制，所以 `?? 0` 与语义一致）。
+    max_total_concurrency: pool.max_total_concurrency ?? 0,
   });
   const [savingSettings, setSavingSettings] = useState(false);
+  /** 正在调限速的那个账号；null = 弹窗关闭。 */
+  const [limitsTarget, setLimitsTarget] = useState<RpAccount | null>(null);
   const [taskLogs, setTaskLogs] = useState<RpCheckinLog[] | null>(null);
   const [logKind, setLogKind] = useState<string>("all");
   const confirm = useConfirm();
@@ -472,6 +500,10 @@ export function AccountsPanel({ overview, reload, onAddAccount }: {
                           <Button variant="outline" size="sm" className="h-7 shrink-0 whitespace-nowrap px-2 text-xs" onClick={() => askActivate(a)}>设为当前</Button>
                         ) : null}
                         <Button variant="outline" size="sm" className="h-7 shrink-0 whitespace-nowrap px-2 text-xs" onClick={() => { setRenameTarget(a); setRenameValue(a.name); }}>备注</Button>
+                        <Button variant="outline" size="sm" className="h-7 shrink-0 whitespace-nowrap px-2 text-xs" title="设置权重 / 并发上限 / 最小间隔" onClick={() => setLimitsTarget(a)}>
+                          限速
+                          {limitsBadge(a) ? <span className="ml-1 rounded bg-amber-500/20 px-1 text-[10px] font-semibold text-amber-500">{limitsBadge(a)}</span> : null}
+                        </Button>
                         <Button variant="outline" size="sm" className="h-7 shrink-0 whitespace-nowrap px-2 text-xs" onClick={() => askToggle(a)}>{a.enabled ? "暂停" : "恢复"}</Button>
                         <Button variant="outline" size="sm" className="h-7 shrink-0 whitespace-nowrap px-2 text-xs text-destructive hover:text-destructive" onClick={() => askDelete(a)}>删除</Button>
                       </div>
@@ -614,6 +646,57 @@ export function AccountsPanel({ overview, reload, onAddAccount }: {
           </Field>
           <Button size="sm" disabled={savingSettings} onClick={() => void saveSettings()}>{savingSettings ? "保存中…" : "保存设置"}</Button>
         </div>
+        {/* 账号级流量整形的默认值。放在「请求调度」里而不是单独的卡片，
+            因为它和轮转策略是同一件事的两面：轮转决定「轮到谁」，
+            这三个字段决定「轮到之后允许多猛」。 */}
+        <div className="mt-4 flex flex-wrap items-end gap-3 border-t border-border/60 pt-4">
+          <Field label="新号默认权重">
+            <Input
+              type="number" min={0.1} max={100} step={0.1}
+              className="h-8 w-24 text-xs"
+              value={settings.default_weight}
+              onChange={(e) => setSettings((s) => ({ ...s, default_weight: Number(e.target.value) || 0.1 }))}
+            />
+          </Field>
+          <Field label="新号默认并发上限">
+            <Input
+              type="number" min={0} max={64} step={1}
+              className="h-8 w-24 text-xs"
+              value={settings.default_max_concurrency}
+              onChange={(e) => setSettings((s) => ({ ...s, default_max_concurrency: Math.max(0, Number(e.target.value) || 0) }))}
+            />
+          </Field>
+          <Field label="新号默认最小间隔（秒）">
+            <Input
+              type="number" min={0} max={3600} step={0.5}
+              className="h-8 w-24 text-xs"
+              value={settings.default_min_interval}
+              onChange={(e) => setSettings((s) => ({ ...s, default_min_interval: Math.max(0, Number(e.target.value) || 0) }))}
+            />
+          </Field>
+          {/* 全池总量闸门。和上面三项不同：上面是「每个号自己的上限」，
+              这一项是「所有号加起来同时打到上游多少个」。20 个号各配 3 并发
+              时，单号看全都合规，上游看到的却是 60 个请求同时到。 */}
+          <Field label="全池并发上限">
+            <Input
+              type="number" min={0} max={256} step={1}
+              className="h-8 w-24 text-xs"
+              value={settings.max_total_concurrency ?? 0}
+              onChange={(e) => setSettings((s) => ({ ...s, max_total_concurrency: Math.min(256, Math.max(0, Math.trunc(Number(e.target.value) || 0))) }))}
+            />
+          </Field>
+        </div>
+        <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
+          这三项是<strong className="font-medium">事前防封</strong>的主要手段：封号的直接诱因几乎都是单账号短时间被打太多。
+          上面的值是新建账号的初值，也可以在表格每行的「限速」里单独调。并发上限与最小间隔填 0 表示不限制；
+          权重填 0 表示不参与自动轮转（手动指定仍可用），所以这里的默认权重不接受 0。
+        </p>
+        <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
+          <strong className="font-medium">全池并发上限</strong>限制的是同时打到上游的
+          <strong className="font-medium">总</strong>请求数，不分是哪个账号发的，超出的排队等一会儿再发。
+          账号级上限治不了「每个号都没超、但整体太猛」——20 个号各配 3 并发，单号看全都合规，
+          上游看到的却是 60 个请求同一瞬间到达。填 0 表示不限制。
+        </p>
         <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
           派猫猫旅行按服务端状态机走：派发 → 到点回查 → 领奖；官网「累了，明天再来吧」即当日结束，不再重试。
           每日名额没派成或遇到可重试的失败时，每 30 分钟补一轮；领奖对账每 15 分钟一次，且不受自动派发开关影响——
@@ -738,6 +821,16 @@ export function AccountsPanel({ overview, reload, onAddAccount }: {
       </Dialog>
 
       <ConfirmDialog request={confirm.request} onClose={confirm.close} onDone={() => void reload().catch(() => undefined)} />
+      <AccountLimitsDialog
+        account={limitsTarget}
+        defaults={{
+          weight: settings.default_weight,
+          max_concurrency: settings.default_max_concurrency,
+          min_interval: settings.default_min_interval,
+        }}
+        onClose={() => setLimitsTarget(null)}
+        onSaved={() => reload()}
+      />
     </div>
   );
 }

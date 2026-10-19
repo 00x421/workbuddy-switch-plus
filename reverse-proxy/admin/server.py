@@ -26,10 +26,12 @@ from . import groups
 from . import keysvc
 from . import realm as realm_mod
 from . import settings_store
+from . import throttle
 from . import version as _version
 from . import keyexport
 from . import usage
 from .browser_login import BrowserLogin
+from . import browser_login as browser_login_mod
 from .pool import TASK_KINDS, AccountPool, PoolMiddleware, default_pool
 from .metrics import RequestMetrics, MetricsMiddleware
 from .security import COOKIE, Security, bearer_session, digest, scope_to_role
@@ -910,9 +912,11 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
         # query 就把 body 静默盖掉（上游踩过这个坑）。
         realm = realm_mod.norm_realm(body.get("realm") or req.query_params.get("realm"))
         region = body.get("region") or req.query_params.get("region")
+        # slot 只在批量扫码里传：同一个 slot 重发码会顶掉旧的，见 browser_login.start。
+        slot = body.get("slot")
         owner, _ = bearer_session(req)
         try:
-            return await browser_login.start(digest(owner), name, realm, region)
+            return await browser_login.start(digest(owner), name, realm, region, slot)
         except (httpx.HTTPError, ValueError, TypeError):
             raise HTTPException(502, "授权服务连接失败，请稍后重试")
 
@@ -931,6 +935,63 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
         owner, _ = bearer_session(req)
         return await browser_login.cancel(fid, digest(owner))
 
+    #: 批量扫码一次最多摆多少张码。
+    #:
+    #: 50 不是拍脑袋：`browser_login.MAX_FLOWS_PER_OWNER` 也是 50，两处必须
+    #: 一致——否则这里允 100、那边在 51 张开始 429，界面会出现「前 50 张好了，
+    #: 后面全红」这种看起来像上游抽风的半成功状态。
+    BATCH_SCAN_MAX = 50
+
+    @app.post("/admin/api/oauth/batch/start")
+    async def oauth_batch_start(req: Request):
+        """批量生成授权链接：一次开 N 张码，供用户连着扫。
+
+        为什么不是「一个接口循环调 N 次 /oauth/start」：
+        `start()` 不传 slot 时会 `cancel_owner(owner)`（单账号登录时代的口径：
+        一个会话只该有一张码）。批量场景下第二次调用会把第一次的码干掉，
+        循环 N 次的结果是只有最后一张活着。所以必须显式带 slot。
+
+        部分失败是**预期结果**而非异常：上游偶发 502 时不该让整批失败，
+        用户已经扫码的那几张不该被回滚。返回 `items` 里逐条给 items.status。
+        """
+        admin(req)
+        body = await payload(req)
+        # 只有**键不存在**或为空才算「没给」（默认 1 张）。写成
+        # `int(body.get("count") or 1)` 会把显式的 0 谎报成 1 —— 调用方要么
+        # 以为一张都没开，要么看到凭空多出一张，两种都不对。
+        raw_count = body.get("count")
+        if raw_count is None or raw_count == "":
+            raw_count = 1
+        try:
+            count = int(raw_count)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "数量必须是整数")
+        if count < 1:
+            raise HTTPException(400, "数量至少为 1")
+        if count > BATCH_SCAN_MAX:
+            raise HTTPException(400, f"一次最多生成 {BATCH_SCAN_MAX} 张登录码")
+        realm = realm_mod.norm_realm(body.get("realm"))
+        region = str(body.get("region") or "").strip().upper()
+        if region and region not in realm_mod.REGION_CODES:
+            raise HTTPException(400, f"不支持的地区：{region}")
+        prefix = str(body.get("prefix") or "批量").strip()[:40] or "批量"
+        owner, _ = bearer_session(req)
+        owner_digest = digest(owner)
+        items = []
+        for index in range(count):
+            slot = f"b{index}"
+            try:
+                flow = await browser_login.start(
+                    owner_digest, f"{prefix}{index + 1}", realm, region or None, slot)
+                items.append({"slot": slot, "status": "ready", **flow})
+            except HTTPException as exc:
+                items.append({"slot": slot, "status": "failed", "error": str(exc.detail)})
+            except (httpx.HTTPError, ValueError, TypeError):
+                items.append({"slot": slot, "status": "failed", "error": "授权服务连接失败"})
+        ready = sum(1 for item in items if item["status"] == "ready")
+        security.audit(owner, "oauth_batch_start", f"{ready}/{count}", f"realm={realm}")
+        return {"items": items, "ready": ready, "count": count, "realm": realm,
+                "region": region, "ttl": browser_login_mod.TTL}
     #: 只读身份可以看到的 pool 字段。**白名单**，不是黑名单。
     #: pool 段里存着 wb2api_key（发给上游的 Bearer 凭据），
     #: 而端点只要 viewer —— 用白名单是因为这个 store 段谁都能往里加键，
@@ -1111,6 +1172,53 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
                 if not isinstance(key, str):
                     raise HTTPException(400, "上游密钥需为字符串")
                 settings["wb2api_key"] = key.strip()
+            # ── 账号级流量整形的默认值（新号初值，也是全池统改的入口）──
+            #
+            # 校验口径与单账号那三个字段一致，但**下限不同**：
+            # 这里的权重必须是正数。把「默认权重」设成 0 等于让新加的号
+            # 一律不参与轮转——加完发现不工作，且没有任何提示。
+            # 「不参与轮转」是单账号的语义，不是默认值的语义。
+            if "default_weight" in body:
+                try:
+                    weight = float(body["default_weight"])
+                except (TypeError, ValueError):
+                    raise HTTPException(400, "默认权重需为数字")
+                if weight != weight or weight in (float("inf"), float("-inf")):
+                    raise HTTPException(400, "默认权重需为有限数字")
+                if not 0.1 <= weight <= 100:
+                    raise HTTPException(400, "默认权重需在 0.1–100 之间")
+                settings["default_weight"] = round(weight, 2)
+            if "default_max_concurrency" in body:
+                try:
+                    limit = int(body["default_max_concurrency"])
+                except (TypeError, ValueError):
+                    raise HTTPException(400, "默认并发上限需为整数")
+                if not 0 <= limit <= throttle.MAX_CONCURRENCY:
+                    raise HTTPException(
+                        400, f"默认并发上限需在 0–{throttle.MAX_CONCURRENCY} 之间")
+                settings["default_max_concurrency"] = limit
+            if "default_min_interval" in body:
+                try:
+                    gap = float(body["default_min_interval"])
+                except (TypeError, ValueError):
+                    raise HTTPException(400, "默认最小间隔需为数字")
+                if gap != gap or gap in (float("inf"), float("-inf")):
+                    raise HTTPException(400, "默认最小间隔需为有限数字")
+                if not 0 <= gap <= throttle.MAX_MIN_INTERVAL:
+                    raise HTTPException(
+                        400, f"默认最小间隔需在 0–{int(throttle.MAX_MIN_INTERVAL)} 秒之间")
+                settings["default_min_interval"] = round(gap, 2)
+            # 全池总并发上限。允许 0（不限制）——这一项和默认权重不同：
+            # 「不限制」本来就是它的缺省语义，不需要挡住。
+            if "max_total_concurrency" in body:
+                try:
+                    gate = int(body["max_total_concurrency"])
+                except (TypeError, ValueError):
+                    raise HTTPException(400, "全池并发上限需为整数")
+                if not 0 <= gate <= throttle.MAX_CONCURRENCY:
+                    raise HTTPException(
+                        400, f"全池并发上限需在 0–{throttle.MAX_CONCURRENCY} 之间")
+                settings["max_total_concurrency"] = gate
             store.data["pool"] = settings
             store.save()
         # 改了地址/密钥必须立刻生效，不能还拿旧上游的缓存糊弄界面。
@@ -1118,7 +1226,9 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
         editable = ('routing', 'spread', 'spread_minutes', 'auto_checkin', 'checkin_time',
                     'auto_travel', 'travel_time', 'auto_keepalive', 'keepalive_hours',
                     'auto_active', 'active_time', 'active_reports',
-                    'wb2api_base', 'wb2api_key')
+                    'wb2api_base', 'wb2api_key',
+                    'default_weight', 'default_max_concurrency', 'default_min_interval',
+                    'max_total_concurrency')
         security.audit(actor, "update_pool_settings", "",
                        f"字段={'、'.join(sorted(k for k in body if k in editable))}；来源 {client_ip(req)}")
         return {"ok": True, "pool": settings}
@@ -1633,6 +1743,48 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
         security.audit(actor, "update_account", new["name"],
                        f"字段={'、'.join(sorted(k for k in body if k in ('name', 'enabled', 'active')))}；来源 {client_ip(req)}")
         return {"ok": True}
+
+    @app.put("/admin/api/accounts/{aid}/limits")
+    async def set_account_limits(aid: str, req: Request):
+        """设置账号级流量整形：权重 / 并发上限 / 最小间隔。
+
+        这三项是**防封号**的直接手段：封号的直接诱因几乎都是单账号短时间
+        被打了太多请求。池级的 spread 是全域一刀切，改不了「这个新号先养着、
+        那个稳的号多跑点」这种差别对待。
+
+        传 `null`（JSON null）或干脆不传某个键 = 不动那一项，不是设成 0。
+        这个区分很重要：界面上改权重时不该把并发上限一起清掉。
+        """
+        actor = admin(req)
+        body = await payload(req)
+        if not isinstance(body, dict):
+            raise HTTPException(400, "参数格式不正确")
+        values = {}
+        for field, cap, label in (("weight", throttle.MAX_WEIGHT, "权重"),
+                                  ("max_concurrency", throttle.MAX_CONCURRENCY, "并发上限"),
+                                  ("min_interval", throttle.MAX_MIN_INTERVAL, "最小间隔")):
+            if field not in body:
+                continue
+            raw = body[field]
+            if raw is None:
+                continue
+            if isinstance(raw, bool):
+                raise HTTPException(400, f"{label}必须是数字")
+            try:
+                num = float(raw)
+            except (TypeError, ValueError):
+                raise HTTPException(400, f"{label}必须是数字")
+            if num != num or num in (float("inf"), float("-inf")):
+                raise HTTPException(400, f"{label}必须是有限数字")
+            if num < 0:
+                raise HTTPException(400, f"{label}不能是负数")
+            if num > cap:
+                raise HTTPException(400, f"{label}最大 {cap:g}")
+            values[field] = int(num) if field != "min_interval" else float(num)
+        saved = pool.set_limits(aid, **values)
+        security.audit(actor, "set_account_limits", aid,
+                       f"字段={'、'.join(sorted(values)) or '无'}；来源 {client_ip(req)}")
+        return {"ok": True, **saved}
 
     @app.delete("/admin/api/accounts/{aid}")
     async def delete_account(aid: str, req: Request):

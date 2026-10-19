@@ -22,6 +22,7 @@ from . import egress
 from . import groups
 from . import keysvc
 from . import report
+from . import throttle
 from . import travel
 from . import usage
 from . import wb2api
@@ -147,6 +148,11 @@ REQUEST_LOG_COMPACT_THRESHOLD = 1000
 # 但冷却剩余时间是要「看着动」的，所以也不能太长——5 秒比一次请求便宜得多，
 # 又不至于让倒计时明显跳步。
 UPSTREAM_TTL = 5.0
+# 全池闸门顶满时，请求最多让出事件循环重试几次、每次等多久。
+# 5 × 0.05s = 250ms 上限：够等到一个在途请求收尾，又不至于让上游开始
+# 对我们自己超时。等不到就兜底放行（见 acquire 的注释）。
+GATE_RETRIES = 5
+GATE_RETRY_DELAY = 0.05
 DEFAULT_POOL = {
     "routing": "round_robin",
     "auto_checkin": True,
@@ -182,6 +188,27 @@ DEFAULT_POOL = {
     # 走完这一段时间再换下一个。用来控制「同一账号在短时间内被连续调用」的量。
     "spread": False,
     "spread_minutes": 30,
+    # ── 账号级流量整形的**默认值** ──
+    #
+    # 三项都是「新加账号时抄一份到这个号上」，账号自己填了就按账号的算。
+    # 之所以给默认值而不是让用户一个个设：池子有几十个号的时候，
+    # 一个个点开设是不现实的，绝大多数人只会想要「全池都一样」。
+    #
+    # 默认值必须让行为与改造前完全一致：
+    #   weight 1      等权（≠0，0 表示不参与自动轮转）
+    #   max_concurrency 0  不限制
+    #   min_interval  0  不限速
+    "default_weight": 1.0,
+    "default_max_concurrency": 0,
+    "default_min_interval": 0.0,
+    # ── 全池总并发上限 ──
+    #
+    # 账号级 max_concurrency 治不了「每个号都没超、但同一时刻整体太猛」：
+    # 20 个号 × 每号 3 并发 = 60 个请求同时打到上游，从单个号看全都合规，
+    # 从风控看却是 20 个账号在同一瞬间一起活跃。这一项是给整体加一道闸。
+    #
+    # 默认 0 = 不限制，与改造前完全一致。它让请求**排队**，不让它们失败。
+    "max_total_concurrency": 0,
 }
 
 
@@ -482,7 +509,18 @@ class AccountPool:
                         # account_status，但以前没透出到 rows()，所以看板只能拿到 remaining。
                         # 这里补齐，让「容量 / 已用 / 套餐数」也能被对账脚本读到。
                         "capacity": status.get("capacity"), "used": status.get("used"),
-                        "packages": status.get("packages")})
+                        "packages": status.get("packages"),
+                        # ── 账号级流量整形（见 admin/throttle.py）─────────────
+                        # 三项都为 0 表示不限制，界面据此显示「不限」而不是「0」。
+                        # `weight` 缺省展示成 1：0 是「不参与轮转」的显式语义，
+                        # 不能拿它冒充「没配」。
+                        "weight": throttle.effective_weight(status),
+                        "max_concurrency": throttle.limits_of(status)["max_concurrency"],
+                        "min_interval": throttle.limits_of(status)["min_interval"],
+                        "inflight": throttle.inflight(status),
+                        # 连续失败次数：界面据此把「偶发抖动」和「快被封了」分开显示。
+                        "consecutive_fails": int(status.get("consecutive_fails") or 0),
+                        "last_fail_at": status.get("last_fail_at")})
             # ── 上游 workbuddy2api 的权威冷却（模型级）──────────────────────
             # 只在这号确实在上游状态里出现过时才填。匹配用 uid——
             # 对不上就什么都不说，绝不能把别的账号的冷却安到这个号头上。
@@ -547,12 +585,30 @@ class AccountPool:
                 return lease_id, False
 
         # 3) 选新号
+        #
+        # 这一步以前是「least_used 取最少 / 否则游标轮流」。现在多了账号级
+        # 流量整形（见 admin/throttle.py）：权重、并发上限、最小间隔。
+        # 三项都为 0 时行为与改造前完全一致——这是升级兼容的硬要求，
+        # 存量 state.json 里没有任何这些字段。
+        statuses = self.store.data["account_status"]
+        # 拆成两组：能立刻发的、以及被并发/间隔卡住的。
+        ready = [row for row in candidates if not throttle.penalty(statuses.get(row["id"], {}), now)[0]]
+        # 全都被卡住时不能在两个组里二选一了事：宁可挑「欠账最少」的那个放过去，
+        # 也不报「暂无可用账号」——那样用户会以为服务挂了，实际是自己把自己限死。
+        pool_rows = ready or candidates
+
         if routing == "least_used":
             # 累计请求数最少的优先；相同则按 id 稳定排序，避免随机抖动。
-            aid = min(candidates, key=lambda row: (self.store.data["account_status"].get(row["id"], {}).get("request_count", 0), row["id"]))["id"]
+            aid = min(pool_rows, key=lambda row: (statuses.get(row["id"], {}).get("request_count", 0), row["id"]))["id"]
         else:
-            aid = candidates[self.cursor % len(candidates)]["id"]
-            self.cursor += 1
+            # 轮流：先按权重展开成确定性序列，再用游标取。
+            order = throttle.weighted_order(pool_rows, statuses, self.cursor)
+            if order:
+                aid = order[0]
+                self.cursor += 1
+            else:  # pragma: no cover - weighted_order 在非空输入下不会返回空
+                aid = pool_rows[self.cursor % len(pool_rows)]["id"]
+                self.cursor += 1
 
         if pool.get("spread"):
             minutes = max(1, int(pool.get("spread_minutes", 30)))
@@ -606,11 +662,85 @@ class AccountPool:
             data = self.store.data["account_status"].setdefault(aid, {})
             data["request_count"] = data.get("request_count", 0) + 1
             data["last_request"] = int(self.clock())
+            # 连续失败计数：认输的号和偶发抖动的号要分开对待。
+            # 只有「上游真的拒绝了」才计；客户端自己取消 / 超时不在此列
+            # （那些是本地网络问题，算到账号头上会误伤）。
+            if status in (401, 402, 403, 429):
+                fails = int(data.get("consecutive_fails") or 0) + 1
+                data["consecutive_fails"] = fails
+                data["last_fail_at"] = int(self.clock())
+            elif status == 200:
+                if data.get("consecutive_fails"):
+                    data["consecutive_fails"] = 0
             if status in (401, 403):
                 data.update(cooldown_until=self.clock() + 300, last_error="上游认证或访问被拒绝，已冷却 5 分钟")
             elif status in (402, 429):
                 data.update(cooldown_until=self.clock() + 1800, last_error="上游额度或频率限制，已冷却 30 分钟")
             self.store.save()
+
+    # ── 账号级流量整形（并发 / 间隔）──────────────────────────────────
+    def acquire(self, aid, ignore_gate=False):
+        """占一个在途名额。返回 True 表示占到了。
+
+        只是个计数，不是信号量：拿到 False 时调用方应该换号或后退，
+        而不是阻塞等待——阻塞会把整个事件循环拖死。
+
+        **两级判断，顺序不能反**：
+
+        1. 池级总量闸门（`max_total_concurrency`）。它先于账号级判断，
+           因为这一项的意义是限制「打到上游的总量」。如果先判账号级，
+           每个号都会各自生效，闸门等于没有。
+        2. 账号级 `max_concurrency`。
+
+        `ignore_gate=True` 给后台任务（签到/旅行/保活）用：那些是每号
+        一天一次的串行动作，不该和对话流量抢同一个闸门名额，否则用户配
+        一个很小的上限时会连带把定时任务全部饿死。
+        """
+        with self.store.lock:
+            if not ignore_gate:
+                gate = throttle.pool_gate(self.store.data.get("pool"))
+                if gate > 0:
+                    total = throttle.total_inflight(self.store.data["account_status"])
+                    if total >= gate:
+                        return False
+            data = self.store.data["account_status"].setdefault(aid, {})
+            lim = throttle.limits_of(data)["max_concurrency"]
+            cur = throttle.inflight(data)
+            if lim > 0 and cur >= lim:
+                return False
+            data["inflight"] = cur + 1
+            return True
+
+    def release(self, aid):
+        """归还在途名额。必须与 `acquire` 配对，且要放在 finally 里。
+
+        计数只会减到 0，不会变负——服务重启时 `inflight` 是脏值（可能残留
+        上次的计数），归零比精确减一更重要，否则账号会被永久判定为打满。
+        """
+        with self.store.lock:
+            data = self.store.data["account_status"].get(aid)
+            if not data:
+                return
+            cur = throttle.inflight(data)
+            data["inflight"] = max(0, cur - 1)
+
+    def set_limits(self, aid, weight=None, max_concurrency=None, min_interval=None):
+        """设置账号级限制。传 None 表示「不动这一项」，不是「设成 0」。
+
+        这个区分很重要：界面上改权重时不该把并发上限一起清掉。
+        """
+        with self.store.lock:
+            if aid not in self.store.data["accounts"]:
+                raise HTTPException(404, "账号不存在")
+            data = self.store.data["account_status"].setdefault(aid, {})
+            if weight is not None:
+                data["weight"] = max(0, min(int(weight), throttle.MAX_WEIGHT))
+            if max_concurrency is not None:
+                data["max_concurrency"] = max(0, min(int(max_concurrency), throttle.MAX_CONCURRENCY))
+            if min_interval is not None:
+                data["min_interval"] = max(0.0, min(float(min_interval), throttle.MAX_MIN_INTERVAL))
+            self.store.save()
+            return {k: data.get(k, 0) for k in ("weight", "max_concurrency", "min_interval")}
 
     def log_request(self, aid, model, status, ok, tokens, credit, duration_ms, outcome, source="api", *,
                     first_token_ms=0, cached_tokens=0, upstream_model=None, key_id=None, key_hint=None,
@@ -1681,6 +1811,11 @@ class PoolMiddleware:
         model = None
         upstream_model = None
         aid = None
+        # 已占住名额的账号 id。`None` = 什么都没占（select 就失败了），
+        # 此时 finally 里的 release 不该被触发。
+        # 必须在 try 之前初始化：select() 可能先抛 HTTPException 直接跳进
+        # except，那时 try 块里的赋值一条都没执行。
+        granted = None
         try:
             key = self.pool.store.check_api(headers.get(b"authorization", b"").decode(), headers.get(b"x-api-key", b"").decode())
             raw = bytearray()
@@ -1723,6 +1858,27 @@ class PoolMiddleware:
                 return await original_receive()
             receive = replay_receive
             aid, manager = self.pool.select(affinity_key, key=key)
+            # 占一个在途名额。顺序是「换号 → 排队 → 兜底放行」：
+            #
+            # 1. 先换一个号试试。多数情况下换号就能占到，不必让用户等。
+            # 2. 换号也不行，说明卡的是**全池总量闸门**（换号不会改变总数），
+            #    那就短暂让出事件循环再重试几次。把闸门变成硬拒绝会让
+            #    「上限 8、同时来了 20 个」时后 12 个直接失败——用户配这一项
+            #    的本意是「排一下队」，不是「直接拒绝」。
+            # 3. 排队也超时，跟着 select 的兜底走（挑欠账最少的号），
+            #    宁可超一点也不要报「暂无可用账号」——那会让人以为服务挂了。
+            if not self.pool.acquire(aid):
+                aid, manager = self.pool.select(affinity_key, key=key)
+                if not self.pool.acquire(aid):
+                    for _ in range(GATE_RETRIES):
+                        await asyncio.sleep(GATE_RETRY_DELAY)
+                        if self.pool.acquire(aid, ignore_gate=False):
+                            break
+                    else:
+                        # 兜底放行：只占账号级名额，不再计全局闸门。
+                        # 注意这里**必须**成功，否则后面的 release 会多减一次。
+                        self.pool.acquire(aid, ignore_gate=True)
+            granted = aid
 
             def bind_egress(account_id, cred):
                 """把选中的账号绑到它那条出口线路上（无线路 = 直连 = None）。"""
@@ -1736,11 +1892,17 @@ class PoolMiddleware:
             try:
                 await asyncio.to_thread(manager.get_headers)
             except Exception:
+                # 换号：把刚才占的名额还回去，否则那次失败的占用会永久计在这个号上。
+                if granted is not None:
+                    self.pool.release(granted)
                 self.pool.update(aid, cooldown_until=self.pool.clock()+300, last_error="凭据暂不可用，已冷却 5 分钟")
                 aid, manager = self.pool.select(affinity_key, key=key)
+                self.pool.acquire(aid)
+                granted = aid
                 egress_url = bind_egress(aid, manager)
                 await asyncio.to_thread(manager.get_headers)
         except HTTPException as e:
+            # 走到这里说明名额还没占到（select 就失败了），无需归还。
             # 503 只可能来自 select()——即「一个可用账号都没有」。把它和
             # 「密钥被规则挡下」区分开，日志页才能一眼看出该去补账号还是改密钥。
             self.pool.log_request(aid, model, e.status_code, False, 0, 0,
@@ -1814,6 +1976,10 @@ class PoolMiddleware:
         finally:
             REQUEST_CREDENTIAL.reset(token)
             egress.REQUEST_EGRESS.reset(egress_token)
+            # 必须先还名额再记状态：`record` 会更新 last_request，
+            # 而并发上限的判断依赖 inflight 已经归位。
+            if granted is not None:
+                self.pool.release(granted)
             self.pool.record(aid, status)
             self.pool.log_request(aid, model, status, 200 <= status < 300,
                                   tokens_used, credit_used, (time.monotonic()-started)*1000,

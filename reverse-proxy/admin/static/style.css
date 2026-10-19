@@ -596,8 +596,24 @@ main { padding: 28px 34px 40px; flex: 1; min-width: 0; }
   font-size: 10px; font-weight: 600; cursor: help;
 }
 
-/* ---------- 统计卡 ---------- */
-.stats {
+/* 账号限速角标。只在账号偏离默认值时才出现，所以它本身就有「这行不一样」
+   的含义——用警示色而不是中性色，扫一眼就能定位到被单独调过的号。 */
+.limit-badge {
+  display: inline-block; margin-left: 4px; padding: 0 5px;
+  border-radius: 4px;
+  background: rgba(255, 176, 32, .18); color: #ffc861;
+  font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums;
+  vertical-align: 1px;
+}
+
+/* 表单字段下的解释文字。用 span 包在 label 里，所以必须 block，
+   否则会和字段名挤在同一行把 label 撑高。 */
+.field-hint {
+  display: block; margin-top: 2px;
+  color: var(--muted-foreground); font-size: 11px; font-weight: 400; line-height: 1.5;
+}
+
+/* ---------- 统计卡 ---------- */.stats {
   display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px;
   margin-bottom: 22px;
 }
@@ -1077,6 +1093,62 @@ dialog::backdrop { background: rgba(3, 7, 18, .68); backdrop-filter: blur(3px); 
   background: rgba(86, 156, 214, .18);
   color: #7fbdf0;
 }
+
+/* ── 批量扫码 ──────────────────────────────────────────────────────── */
+.toolbar-actions { display: flex; align-items: center; gap: 8px; }
+
+.batch-setup {
+  display: grid; gap: 12px;
+  grid-template-columns: 96px 1fr;
+  align-items: end;
+  margin-top: 18px;
+}
+.batch-setup > .realm-picker { grid-column: 1 / -1; margin-top: 4px; }
+.batch-setup > label { font-size: 12px; color: var(--ink-dim); }
+.batch-setup > input { width: 100%; }
+.batch-setup > #batch-count { max-width: 96px; }
+.batch-setup > #batch-generate { grid-column: 1 / -1; justify-self: start; }
+
+.batch-progress {
+  margin-top: 14px; padding: 9px 12px;
+  font-size: 12px; color: var(--ink-dim);
+  background: var(--sunken); border: 1px solid var(--border); border-radius: 9px;
+}
+
+.batch-grid {
+  display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  margin-top: 14px;
+  max-height: 46vh; overflow-y: auto;
+  padding-right: 2px;
+}
+
+.batch-cell {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 11px 12px;
+  background: var(--sunken);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.batch-cell[data-state=success] { border-color: rgba(0, 188, 125, .38); }
+.batch-cell[data-state=failed] { border-color: rgba(226, 74, 74, .42); }
+.batch-cell[data-state=expired] { border-color: rgba(214, 158, 46, .38); }
+
+.batch-cell-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.batch-cell-index { font-size: 12px; font-weight: 700; color: var(--ink); }
+.batch-cell-badge {
+  font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 999px;
+  background: rgba(255, 255, 255, .07); color: var(--ink-dim);
+}
+.batch-cell-badge[data-tone=ok] { background: rgba(0, 188, 125, .16); color: #5ff0b8; }
+.batch-cell-badge[data-tone=bad] { background: rgba(226, 74, 74, .16); color: #ff8a8a; }
+.batch-cell-badge[data-tone=warn] { background: rgba(214, 158, 46, .16); color: #f0c060; }
+
+.batch-cell-body { display: flex; flex-direction: column; gap: 5px; }
+.batch-cell-note, .batch-cell-error { margin: 0; font-size: 11px; line-height: 1.5; }
+.batch-cell-error { color: #ff8a8a; }
+.batch-cell-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.batch-cell-actions .batch-open { font-size: 12px; padding: 5px 9px; }
 
 .oauth-step { display: flex; gap: 15px; margin-top: 22px; }
 .oauth-step > div { min-width: 0; flex: 1; }

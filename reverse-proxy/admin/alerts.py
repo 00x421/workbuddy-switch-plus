@@ -38,6 +38,9 @@ ALERT_KINDS = {
     "banned": "账号封禁告急",
     "frozen": "模型冻结告急",
     "upstream_disabled": "上游停用告急",
+    # 还没到封号，但在往那个方向走。单独一类而不是并进 banned：
+    # 封号是既成事实要立刻处理，连续失败是预警，处理窗口完全不同。
+    "account_failing": "账号连续失败预警",
     # ── 额度级：还能用，但快用完了 ──
     "credits": "积分用量告急",
     "quota": "密钥额度告急",
@@ -60,6 +63,7 @@ FLAG_KEYS = (
     "notify_on_frozen",
     "notify_on_credits",
     "notify_on_upstream_disabled",
+    "notify_on_account_failing",
     "notify_on_quota",
     "notify_on_pool_empty",
     "notify_on_pool_thin",
@@ -101,12 +105,17 @@ def defaults() -> dict:
         "stale_minutes": 120,
         # 密钥连续被拒几次算异常（同一条日志窗口内）。
         "key_reject_threshold": 5,
+        # 账号连续失败几次算「快被封了」。达到就报预警，而不是等封号。
+        # 取 3 的依据：401/403 会先进 5 分钟冷却，429/402 进 30 分钟；
+        # 同一个号在冷却之外还能连挂 3 次，基本不是偶发抖动。
+        "account_fail_threshold": 3,
         # 各类告警的开关。默认开——告警的价值就在于「不用时也在盯着」，
         # 默认关掉的告警等于没有。嫌吵应该调阈值，而不是关开关。
         "notify_on_banned": True,
         "notify_on_frozen": True,
         "notify_on_credits": True,
         "notify_on_upstream_disabled": True,
+        "notify_on_account_failing": True,
         "notify_on_quota": True,
         "notify_on_pool_empty": True,
         "notify_on_pool_thin": False,     # 默认关：只在池子真的空时报，避免天天响
@@ -203,6 +212,7 @@ def normalize(patch: dict) -> dict:
         ("pool_min_available", 0, 1000, "池下限"),
         ("stale_minutes", 1, 100_000, "快照过期分钟"),
         ("key_reject_threshold", 1, 10_000, "密钥被拒次数"),
+        ("account_fail_threshold", 1, 1000, "账号连续失败次数"),
     ):
         if field in patch:
             try:
@@ -348,6 +358,22 @@ def detect(accounts, cfg, previous, now=None, *, keys=None, logs=None) -> list[d
             reason = str(row.get("up_reason") or "").strip()
             tail = f"，{reason}" if reason else ""
             buckets["upstream_disabled"].append(f"{name}{manual}{detail}{tail}")
+
+        # ── 账号连续失败预警（还没到封号，但在往那边走）──
+        #
+        # 与 `refresh_failed` 的区别：那一条只要「有 last_error」就报，
+        # 偶发一次网络抖动也会响；这一条要**连续** N 次失败才报，
+        # 而且失败计数只会被一次成功清零（见 pool.record）。
+        #
+        # 之所以值得单独一类：封号是不可逆的，预警是可以在封之前
+        # 手动降权、换个出口线路或者干脆停一天的。
+        if cfg.get("notify_on_account_failing", True):
+            fails = row.get("consecutive_fails")
+            limit = cfg.get("account_fail_threshold", 3)
+            if isinstance(fails, int) and not isinstance(fails, bool) and fails >= limit:
+                err = str(row.get("last_error") or "").strip()
+                tail = f"，最近错误：{err[:60]}" if err else ""
+                buckets["account_failing"].append(f"{name}（连续失败 {fails} 次{tail}）")
 
         # ── 积分告急 ──
         if cfg.get("notify_on_credits", True):

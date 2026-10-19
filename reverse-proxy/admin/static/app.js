@@ -175,6 +175,12 @@ function render() {
     // 上游接入点：用 ?? "" 而不是 || —— 空串本身是有效状态（= 不读上游），
     // 用 || 会让它退到默认值，用户就永远清不掉已填的地址。
     $("wb2api-base").value = overview.pool?.wb2api_base ?? ""; $("wb2api-key").value = overview.pool?.wb2api_key ?? "";
+    // 流量整形默认值：三项都用 ?? 而不是 ||，因为 0 是有效取值
+    // （0 = 不限制 / 不限速），用 || 会让 0 退回一个非零默认值。
+    $("default-weight").value = overview.pool?.default_weight ?? 1;
+    $("default-max-concurrency").value = overview.pool?.default_max_concurrency ?? 0;
+    $("default-min-interval").value = overview.pool?.default_min_interval ?? 0;
+    $("max-total-concurrency").value = overview.pool?.max_total_concurrency ?? 0;
   }
   const keyRow = k => `<tr><td><strong>${esc(k.name)}</strong>${k.realm ? `<small class="cell-note">${k.realm === "cn" ? "仅国内版" : "仅国际版"}</small>` : ""}</td><td><div class="secret-cell"><code data-secret="${esc(k.secret || k.hint)}" data-hidden="1">${esc(k.secret ? "•".repeat(12) : k.hint)}</code><button class="text-button reveal" data-reveal="${k.id}" title="显示 / 隐藏密钥" aria-label="显示或隐藏密钥">${ICON_EYE}</button>${k.secret ? `<button class="text-button" data-copy-key="${k.id}" title="复制密钥" aria-label="复制密钥">${ICON_COPY}</button>` : ""}</div></td><td>${keyStateCell(k)}</td><td class="muted mono">${esc(stamp(k.created * 1000))}</td><td>${groupTags(k.groups)}</td><td>${keyLimitCell(k)}</td><td class="align-right"><div class="actions"><button data-edit-key="${esc(k.id)}">编辑</button><button class="danger" data-revoke="${k.id}">撤销</button></div></td></tr>`;
   $("keys-body").innerHTML = keys.map(keyRow).join("")
@@ -345,11 +351,22 @@ function renderAccounts() {
       ? `<span class="mini-enterprise mini-realm" title="国际版账号：走 workbuddy.ai，首次使用需注册地区">国际版</span>` : "";
     const credits = a.remaining === null || a.remaining === undefined ? "—" : Number(a.remaining).toLocaleString("zh-CN",{maximumFractionDigits:2});
     const creditNote = a.is_enterprise ? "企业配额" : (a.credits_updated ? esc(stamp(a.credits_updated*1000)) : "点击查询积分");
-    return `<tr><td><div class="account-cell"><span class="account-icon">${esc(a.name.slice(0,1))}</span><div><strong>${esc(a.name)}${a.active ? '<span class="mini-active">手动 / 测试账号</span>' : ""}${enterprise}${realmBadge}</strong><small>${esc(a.uid || a.nickname)}</small></div></div></td><td><span class="pill ${status[1]}">${status[0]}</span><small class="cell-note">${a.today_checked_in ? "今日已签到" : "今日未确认签到"}</small>${travelNote(a)}${activeNote(a)}${a.cooldown_until > Date.now()/1000 ? `<small class="cell-note">至 ${esc(stamp(a.cooldown_until*1000))}</small>` : ""}${upstreamNote(a)}</td><td><strong class="credit-number">${credits}</strong><small class="cell-note">${creditNote}${a.credits_stale && a.credits_updated ? " · 待刷新" : ""}</small>${a.last_error ? `<small class="cell-note field-error">${esc(a.last_error)}</small>` : ""}</td><td class="mono">${esc(stamp(a.expires_at))}<small class="cell-note">${a.expired ? "已到期 · 调用时尝试刷新" : "支持自动刷新"}</small></td><td><div class="actions pool-actions">${a.enabled ? `<button data-action="status" data-id="${a.id}" title="查询积分与签到状态">查询积分</button><button data-action="checkin" data-id="${a.id}">签到</button><button data-action="travel" data-id="${a.id}" title="按状态机派一次猫猫旅行；已在旅途中会提示">派旅行</button><button data-action="travel-claim" data-id="${a.id}" title="回查官方状态，到点则领奖">领奖</button><button data-action="active" data-id="${a.id}" title="向上游发送一条 chat_request_send 事件，点亮 growth 连登">活跃</button><button data-action="refresh" data-id="${a.id}">刷新凭据</button>` : ""}${a.enabled && !a.active ? `<button data-action="activate" data-id="${a.id}">设为手动 / 测试</button>` : ""}<button data-action="rename" data-id="${a.id}">备注</button><button data-action="toggle" data-id="${a.id}">${a.enabled ? "暂停" : "恢复"}</button><button class="danger" data-action="delete" data-id="${a.id}">删除</button></div></td></tr>`;
+    return `<tr><td><div class="account-cell"><span class="account-icon">${esc(a.name.slice(0,1))}</span><div><strong>${esc(a.name)}${a.active ? '<span class="mini-active">手动 / 测试账号</span>' : ""}${enterprise}${realmBadge}</strong><small>${esc(a.uid || a.nickname)}</small></div></div></td><td><span class="pill ${status[1]}">${status[0]}</span><small class="cell-note">${a.today_checked_in ? "今日已签到" : "今日未确认签到"}</small>${travelNote(a)}${activeNote(a)}${a.cooldown_until > Date.now()/1000 ? `<small class="cell-note">至 ${esc(stamp(a.cooldown_until*1000))}</small>` : ""}${upstreamNote(a)}</td><td><strong class="credit-number">${credits}</strong><small class="cell-note">${creditNote}${a.credits_stale && a.credits_updated ? " · 待刷新" : ""}</small>${a.last_error ? `<small class="cell-note field-error">${esc(a.last_error)}</small>` : ""}</td><td class="mono">${esc(stamp(a.expires_at))}<small class="cell-note">${a.expired ? "已到期 · 调用时尝试刷新" : "支持自动刷新"}</small></td><td><div class="actions pool-actions">${a.enabled ? `<button data-action="status" data-id="${a.id}" title="查询积分与签到状态">查询积分</button><button data-action="checkin" data-id="${a.id}">签到</button><button data-action="travel" data-id="${a.id}" title="按状态机派一次猫猫旅行；已在旅途中会提示">派旅行</button><button data-action="travel-claim" data-id="${a.id}" title="回查官方状态，到点则领奖">领奖</button><button data-action="active" data-id="${a.id}" title="向上游发送一条 chat_request_send 事件，点亮 growth 连登">活跃</button><button data-action="refresh" data-id="${a.id}">刷新凭据</button>` : ""}${a.enabled && !a.active ? `<button data-action="activate" data-id="${a.id}">设为手动 / 测试</button>` : ""}<button data-action="rename" data-id="${a.id}">备注</button><button data-action="limits" data-id="${a.id}" title="设置权重 / 并发上限 / 最小间隔">限速${limitsBadge(a)}</button><button data-action="toggle" data-id="${a.id}">${a.enabled ? "暂停" : "恢复"}</button><button class="danger" data-action="delete" data-id="${a.id}">删除</button></div></td></tr>`;
   }).join("") || (overview.accounts.length ? '<tr><td colspan="5" class="muted">没有符合筛选条件的账号。</td></tr>' : "");
 }
-/* ---------- 上游分组 ---------- */
-/* 密钥里存的是分组 id，表格上要显示成人看得懂的名字。分组被删掉后 id 可能悬空
+/* 账号限速按钮上的角标：只有**真的偏离默认**才显示。
+   全池都设了同一个值时不该每行都挂个「5x」—— 那样等于没有信息量，
+   而「这个号和别的号不一样」才是有用的信号。 */
+function limitsBadge(a) {
+  const w = Number(a.weight ?? 1), c = Number(a.max_concurrency ?? 0), gap = Number(a.min_interval ?? 0);
+  const parts = [];
+  if (w !== 1) parts.push(w === 0 ? "停转" : `${w}x`);
+  if (c > 0) parts.push(`≤${c}`);
+  if (gap > 0) parts.push(`${gap}s`);
+  return parts.length ? `<span class="limit-badge">${esc(parts.join(" "))}</span>` : "";
+}
+
+/* ---------- 上游分组 ---------- *//* 密钥里存的是分组 id，表格上要显示成人看得懂的名字。分组被删掉后 id 可能悬空
    （服务端删组时会顺带解绑，但手工改过 state.json 的旧数据未必），退回显示 id 本身，
    总好过显示「未知」让人无从查起。 */
 function groupTags(ids) {
@@ -941,7 +958,7 @@ $("batch-checkin").addEventListener("click", () => batchAction("checkin"));
 $("batch-travel").addEventListener("click", () => confirmAction("批量派猫猫旅行？", "会以每个启用账号的身份向成长中心发起真实派发请求；已在旅途中或今日已派的账号自动跳过。", () => batchAction("travel")));
 // 活跃上报同样是对上游的真实写请求，批量入口先确认一次。
 $("batch-active").addEventListener("click", () => confirmAction("批量活跃上报？", "会以每个启用账号的身份向上游发送一条 chat_request_send 事件，每号每天一轮；国际版账号与今日已上报的账号自动跳过。", () => batchAction("active")));
-$("pool-settings").addEventListener("submit", async e => { e.preventDefault();e.submitter.disabled=true;try {await api("pool/settings",{method:"PATCH",body:{routing:$("pool-routing").value,auto_checkin:$("auto-checkin").checked,checkin_time:$("checkin-time").value,auto_travel:$("auto-travel").checked,travel_time:$("travel-time").value,auto_keepalive:$("auto-keepalive").checked,keepalive_hours:Number($("keepalive-hours").value),auto_active:$("auto-active").checked,active_time:$("active-time").value,active_reports:Number($("active-reports").value),wb2api_base:$("wb2api-base").value.trim(),wb2api_key:$("wb2api-key").value.trim()}});await refresh();toast("账号池设置已保存");}catch(err){toast(err.message);}finally{e.submitter.disabled=false;} });
+$("pool-settings").addEventListener("submit", async e => { e.preventDefault();e.submitter.disabled=true;try {await api("pool/settings",{method:"PATCH",body:{routing:$("pool-routing").value,auto_checkin:$("auto-checkin").checked,checkin_time:$("checkin-time").value,auto_travel:$("auto-travel").checked,travel_time:$("travel-time").value,auto_keepalive:$("auto-keepalive").checked,keepalive_hours:Number($("keepalive-hours").value),auto_active:$("auto-active").checked,active_time:$("active-time").value,active_reports:Number($("active-reports").value),wb2api_base:$("wb2api-base").value.trim(),wb2api_key:$("wb2api-key").value.trim(),default_weight:Number($("default-weight").value),default_max_concurrency:Number($("default-max-concurrency").value),default_min_interval:Number($("default-min-interval").value),max_total_concurrency:Number($("max-total-concurrency").value)}});await refresh();toast("账号池设置已保存");}catch(err){toast(err.message);}finally{e.submitter.disabled=false;} });
 setInterval(() => { if(csrf && overview && !document.hidden && !document.querySelector("dialog[open]") && !$("refresh").disabled) refresh().catch(()=>{}); },30000);
 document.querySelectorAll("[data-page]").forEach(b => b.addEventListener("click", () => goPage(b.dataset.page)));
 $("go-guide").addEventListener("click", () => goPage("guide"));
@@ -1043,6 +1060,260 @@ $("oauth-start").addEventListener("click", async () => {
 $("oauth-copy").addEventListener("click", () => { if (oauthFlow) copy(oauthFlow.url); });
 $("oauth-retry").addEventListener("click", () => { $("oauth-retry").hidden = true; pollOAuth(oauthGeneration); });
 $("add-account").addEventListener("click", openAccount); $("empty-add").addEventListener("click", openAccount);
+
+// ── 批量扫码 ────────────────────────────────────────────────────────────
+// 一次摆 N 张码，用户连着扫。每格独立轮询、独立落盘，互不影响 —— 这是
+// 「批量」与「单账号登录 N 次」的唯一区别，也是它值得单独做的原因：手动开
+// N 次弹窗时，前面几张的码会在你操作后面那几张时悄悄过期。
+let batchRealm = "cn", batchRegion = "", batchTimer = null, batchGeneration = 0;
+let batchCells = [];
+const BATCH_POLL_MS = 3000;
+
+function batchSetRealm(realm) {
+  batchRealm = realm;
+  $("batch-realm-cn").setAttribute("aria-pressed", String(realm === "cn"));
+  $("batch-realm-global").setAttribute("aria-pressed", String(realm === "global"));
+  $("batch-region-picker").hidden = realm !== "global";
+  if (realm === "global") renderBatchRegions();
+}
+
+function renderBatchRegions() {
+  const box = $("batch-region-options");
+  box.textContent = "";
+  // 第一项是「不选」：批量场景下没必要求用户逐批指定，后端会落到默认地区
+  // （见 browser_login.DEFAULT_BATCH_REGION）。留一个显式的不选选项，比让
+  // 用户猜「不点是不是就错了」要好。
+  const items = [["", "不指定（默认中国香港）"], ...REGIONS];
+  items.forEach(([code, label]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.setAttribute("aria-pressed", String(batchRegion === code));
+    button.addEventListener("click", () => { batchRegion = code; renderBatchRegions(); });
+    box.appendChild(button);
+  });
+}
+
+function batchStop() {
+  batchGeneration++;
+  if (batchTimer) { clearTimeout(batchTimer); batchTimer = null; }
+}
+
+function batchReset() {
+  batchStop();
+  batchCells = [];
+  $("batch-grid").textContent = "";
+  $("batch-error").textContent = "";
+  $("batch-summary").textContent = "";
+  $("batch-progress").hidden = true;
+  $("batch-refresh").hidden = true;
+  $("batch-generate").disabled = false;
+  $("batch-generate").textContent = "生成登录码";
+  batchRealm = "cn"; batchRegion = "";
+  batchSetRealm("cn");
+}
+
+function batchCounts() {
+  const counts = { ready: 0, waiting: 0, success: 0, failed: 0, expired: 0 };
+  batchCells.forEach(cell => { counts[cell.state] = (counts[cell.state] || 0) + 1; });
+  return counts;
+}
+
+function batchRenderSummary() {
+  const c = batchCounts();
+  const parts = [];
+  if (c.success) parts.push(`已添加 ${c.success}`);
+  if (c.waiting) parts.push(`待扫码 ${c.waiting}`);
+  if (c.ready) parts.push(`刚就绪 ${c.ready}`);
+  if (c.expired) parts.push(`已过期 ${c.expired}`);
+  if (c.failed) parts.push(`失败 ${c.failed}`);
+  $("batch-summary").textContent = parts.join(" · ");
+  $("batch-refresh").hidden = !c.success;
+}
+
+function batchCellEl(cell) {
+  const wrap = document.createElement("article");
+  wrap.className = "batch-cell";
+  wrap.dataset.slot = cell.slot;
+
+  const head = document.createElement("div");
+  head.className = "batch-cell-head";
+  const index = document.createElement("span");
+  index.className = "batch-cell-index";
+  index.textContent = cell.label;
+  const badge = document.createElement("span");
+  badge.className = "batch-cell-badge";
+  head.append(index, badge);
+
+  const body = document.createElement("div");
+  body.className = "batch-cell-body";
+
+  const actions = document.createElement("div");
+  actions.className = "batch-cell-actions";
+
+  wrap.append(head, body, actions);
+  cell.el = {wrap, badge, body, actions};
+  batchPaintCell(cell);
+  return wrap;
+}
+
+const BATCH_STATE_TEXT = {
+  ready: "待扫码", waiting: "等待登录", success: "已添加",
+  expired: "已过期", failed: "失败",
+};
+
+function batchPaintCell(cell) {
+  const el = cell.el;
+  if (!el) return;
+  const state = cell.state;
+  el.wrap.dataset.state = state;
+  el.badge.textContent = BATCH_STATE_TEXT[state] || state;
+  el.badge.dataset.tone = state === "success" ? "ok" : state === "failed" ? "bad" : state === "expired" ? "warn" : "muted";
+  el.body.textContent = "";
+  el.actions.textContent = "";
+
+  if (cell.error) {
+    const p = document.createElement("p");
+    p.className = "batch-cell-error";
+    p.textContent = cell.error;
+    el.body.appendChild(p);
+  } else if (state === "success") {
+    const p = document.createElement("p");
+    p.className = "batch-cell-note";
+    p.textContent = cell.updated ? "凭据已更新" : `账号 ${cell.accountId || ""} 已入库`;
+    el.body.appendChild(p);
+    if (cell.message) {
+      const note = document.createElement("p");
+      note.className = "batch-cell-note muted";
+      note.textContent = cell.message;
+      el.body.appendChild(note);
+    }
+    if (cell.realm === "global" && cell.region) {
+      const region = document.createElement("p");
+      region.className = "batch-cell-note muted";
+      region.textContent = `地区 ${cell.region}`;
+      el.body.appendChild(region);
+    }
+  } else if (cell.url) {
+    const link = document.createElement("a");
+    link.className = "primary batch-open";
+    link.href = cell.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = "打开登录页 ↗";
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.className = "text-button";
+    copyButton.textContent = "复制链接";
+    copyButton.addEventListener("click", () => copy(cell.url));
+    el.actions.append(link, copyButton);
+    if (state === "waiting") {
+      const tip = document.createElement("p");
+      tip.className = "batch-cell-note muted";
+      tip.textContent = "等待你在官方页面完成登录…";
+      el.body.appendChild(tip);
+    }
+  }
+}
+
+async function batchPoll(generation) {
+  if (generation !== batchGeneration) return;
+  const pending = batchCells.filter(c => (c.state === "ready" || c.state === "waiting") && c.id);
+  if (!pending.length) { batchTimer = null; return; }
+  await Promise.all(pending.map(async cell => {
+    try {
+      const result = await api("oauth/" + cell.id + "/poll", { method: "POST" });
+      if (generation !== batchGeneration) return;
+      if (result.status === "success") {
+        cell.state = "success";
+        cell.updated = Boolean(result.updated);
+        cell.accountId = result.account_id;
+        cell.message = result.message || "";
+        cell.realm = result.realm || batchRealm;
+        cell.region = result.region || "";
+        cell.url = "";
+        toast(result.updated ? `${cell.label} 凭据已更新` : `${cell.label} 已添加`);
+      } else if (result.status === "expired") {
+        cell.state = "expired";
+        cell.url = "";
+      } else {
+        cell.state = "waiting";
+      }
+    } catch (e) {
+      if (generation !== batchGeneration) return;
+      // 单格出错**不能**终止整批：其余格子可能已经扫过了，把它们的轮询
+      // 一起停掉等于让用户白扫。只把这格标失败，别的继续。
+      cell.state = "failed";
+      cell.error = e.message;
+      cell.url = "";
+    }
+    batchPaintCell(cell);
+    batchRenderSummary();
+  }));
+  if (generation !== batchGeneration) return;
+  batchTimer = setTimeout(() => batchPoll(generation), BATCH_POLL_MS);
+}
+
+$("batch-scan").addEventListener("click", () => { batchReset(); $("batch-dialog").showModal(); });
+$("batch-dialog").addEventListener("close", () => batchReset());
+$("batch-realm-cn").addEventListener("click", () => batchSetRealm("cn"));
+$("batch-realm-global").addEventListener("click", () => batchSetRealm("global"));
+$("batch-refresh").addEventListener("click", () => refresh().then(() => toast("账号列表已刷新")).catch(e => toast(e.message)));
+
+$("batch-generate").addEventListener("click", async () => {
+  batchStop();
+  const generation = batchGeneration;
+  const count = Number($("batch-count").value);
+  $("batch-error").textContent = "";
+  if (!Number.isInteger(count) || count < 1) { $("batch-error").textContent = "生成数量至少为 1"; return; }
+  if (count > 50) { $("batch-error").textContent = "一次最多生成 50 张登录码"; return; }
+  $("batch-grid").textContent = "";
+  batchCells = [];
+  $("batch-summary").textContent = "";
+  $("batch-generate").disabled = true;
+  $("batch-generate").textContent = "正在生成…";
+  $("batch-progress").hidden = false;
+  $("batch-progress").textContent = `正在向上游申请 ${count} 张登录码…`;
+  try {
+    const result = await api("oauth/batch/start", { method: "POST", body: {
+      count,
+      realm: batchRealm,
+      region: batchRealm === "global" ? (batchRegion || undefined) : undefined,
+      prefix: $("batch-prefix").value.trim() || "批量",
+    }});
+    if (generation !== batchGeneration) return;
+    batchCells = result.items.map((item, index) => {
+      const cell = {
+        slot: item.slot,
+        label: `#${index + 1}`,
+        id: item.id || "",
+        url: item.url || "",
+        state: item.status === "ready" ? "ready" : "failed",
+        error: item.error || "",
+        message: "", region: "", updated: false, accountId: "",
+      };
+      $("batch-grid").appendChild(batchCellEl(cell));
+      return cell;
+    });
+    const failed = batchCells.filter(c => c.state === "failed").length;
+    $("batch-progress").textContent = failed
+      ? `${count - failed} 张就绪，${failed} 张生成失败。失败的那几格可以关掉弹窗重新生成。`
+      : `${count} 张登录码已就绪，${Math.round(result.ttl / 60)} 分钟内有效。`;
+    batchRenderSummary();
+    if (batchCells.some(c => c.id)) batchTimer = setTimeout(() => batchPoll(generation), BATCH_POLL_MS);
+  } catch (e) {
+    if (generation === batchGeneration) {
+      $("batch-error").textContent = e.message;
+      $("batch-progress").hidden = true;
+    }
+  } finally {
+    if (generation === batchGeneration) {
+      $("batch-generate").disabled = false;
+      $("batch-generate").textContent = "重新生成";
+      batchSetRealm(batchRealm);
+    }
+  }
+});
 async function readFile(file) {
   if (!file) return;
   if (file.size > 1024 * 1024) throw new Error("文件超过 1 MB，请选择登录凭据文件");
@@ -1090,6 +1361,7 @@ $("accounts-body").addEventListener("click", async e => {
   if (b.dataset.action === "rename") confirmAction("编辑账号备注", "备注仅用于在管理后台识别账号。", () => update({name:$("rename-value").value}), a.name);
   if (b.dataset.action === "toggle") confirmAction(a.enabled ? "暂停这个账号？" : "恢复这个账号？", "暂停后不参与新请求分配和自动签到，已开始的请求继续完成。恢复后重新参与轮转。", () => update({enabled:!a.enabled}));
   if (b.dataset.action === "delete") confirmAction("删除这个账号？", `「${a.name}」将从账号列表移除。服务器保留恢复副本。${a.active ? "当前调用账号将被清空。" : ""}`, () => api("accounts/" + a.id, {method:"DELETE"}));
+  if (b.dataset.action === "limits") openLimits(a);
 });
 function onKeyTableClick(e) {
   // 小眼睛：默认只显示掩码，点开才把明文写回单元格（不写进 HTML 属性以免被全选复制带走）。
@@ -1181,6 +1453,50 @@ function openKeyDialog(key) {
 }
 
 $("add-key").addEventListener("click", () => openKeyDialog(null));
+
+/* ---------- 账号限速 ---------- */
+function openLimits(a) {
+  $("limits-id").value = a.id;
+  $("limits-dialog-title").textContent = `账号限速 · ${a.name}`;
+  $("limits-weight").value = a.weight ?? overview.pool?.default_weight ?? 1;
+  $("limits-concurrency").value = a.max_concurrency ?? overview.pool?.default_max_concurrency ?? 0;
+  $("limits-interval").value = a.min_interval ?? overview.pool?.default_min_interval ?? 0;
+  // 显示当前实时状态：设了并发上限却看不见「现在几个在跑」，用户没法判断
+  // 是自己设小了还是号真的挂了。空闲时也显示，说明这个字段是活的。
+  const inflight = Number(a.inflight ?? 0);
+  const gap = Number(a.min_interval ?? 0);
+  const gapNote = gap > 0 && a.last_request
+    ? `上次请求 ${esc(stamp(a.last_request * 1000))}`
+    : "";
+  $("limits-hint").textContent = `当前进行中 ${inflight} 个请求${gapNote ? "，" + gapNote : ""}`;
+  $("limits-error").textContent = "";
+  $("limits-dialog").showModal();
+}
+
+$("limits-dialog").addEventListener("close", () => $("limits-form").reset());
+
+$("limits-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const id = $("limits-id").value;
+  const submit = e.submitter;
+  if (submit) submit.disabled = true;
+  try {
+    // 三个值都要显式发。服务端把「键缺失」当「不动这一项」，
+    // 而这里界面上三个框都摆着，用户看到什么就该存成什么。
+    await api(`accounts/${id}/limits`, {method: "PUT", body: {
+      weight: Number($("limits-weight").value),
+      max_concurrency: Number($("limits-concurrency").value),
+      min_interval: Number($("limits-interval").value),
+    }});
+    $("limits-dialog").close();
+    await refresh();
+    toast("限速已保存");
+  } catch (err) {
+    $("limits-error").textContent = err.message;
+  } finally {
+    if (submit) submit.disabled = false;
+  }
+});
 
 $("key-dialog").addEventListener("close", () => {
   $("key-form").reset();

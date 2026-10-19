@@ -29,6 +29,26 @@ from . import realm as realm_mod
 
 TTL = 300
 
+#: 同时存在的授权会话上限。
+#:
+#: 之前是 16：那是「单账号登录」时代的口径，用户一次只开一张码，16 个
+#: 余额绰绰有余。批量扫码要同时摆出 20~50 个二维码，16 会在第 17 张
+#: 直接 429，而这恰恰是批量场景下的**第一步**，用户会以为功能坏了。
+#:
+#: 每个 flow 持有一个 httpx.AsyncClient（连接池），50 个的总开销仍在
+#: 单进程可接受范围内；真正的上限由 MAX_FLOWS_PER_OWNER 兜住。
+MAX_FLOWS = 60
+
+#: 单个操作者（= 一个管理会话）名下的并发会话上限。
+MAX_FLOWS_PER_OWNER = 50
+
+#: 批量扫码时国际版账号自动注册的默认地区（中国香港）。
+#:
+#: 为什么必须有个默认值而不是「留空待选」：未注册地区 → 聊天 14017，而
+#: 14017 的报错文案（trial not activated）与开号漏步骤之间没有任何可见关联。
+#: 批量场景又没法逐格选地区，所以只能自动挑一个能用的。事后可改。
+DEFAULT_BATCH_REGION = "HK"
+
 
 def _headers(realm):
     """扫码链路自己的请求头。
@@ -108,22 +128,39 @@ class BrowserLogin:
             raise HTTPException(502, "授权服务返回格式异常")
         return obj
 
-    async def start(self, owner, name, realm=realm_mod.CN, region=None):
+    async def start(self, owner, name, realm=realm_mod.CN, region=None, slot=None):
         """生成授权链接。
 
         `realm` 决定打哪一套上游；`region` 只对国际版有意义，会被存进 flow，
         在**落盘之前**用于地区注册——不在这里就注册，是因为那时还没有
         accessToken（region 提交必须带账号身份头）。
+
+        `slot` 是批量扫码用的槽位键（界面上那一格的标识）。同一个 owner 下
+        slot 相同视为**同一格重新发码**，旧的直接顶掉，不会累积成孤儿会话；
+        不传 slot 则退化成「一个 owner 只有一张码」（单账号登录的原有行为，
+        保持向后兼容）。
         """
         r = realm_mod.norm_realm(realm)
         region = str(region or "").strip().upper()
         if r == realm_mod.GLOBAL and region and region not in realm_mod.REGION_CODES:
             raise HTTPException(400, f"不支持的地区：{region}（可选 {' / '.join(sorted(realm_mod.REGION_CODES))}）")
+        slot = str(slot or "").strip()[:32]
         async with self.guard:
             await self.cleanup()
-            if len(self.flows) >= 16:
+            if len(self.flows) >= MAX_FLOWS:
                 raise HTTPException(429, "等待授权的请求过多，请稍后重试")
-            await self.cancel_owner(owner)
+            if slot:
+                # 同一格重发码：顶掉旧的。不这么做的话批量页刷新一次就多
+                # 50 个死会话，很快撞上 MAX_FLOWS，而用户看到的只是「太多了」。
+                for fid, flow in list(self.flows.items()):
+                    if flow["owner"] == owner and flow.get("slot") == slot:
+                        async with flow["lock"]:
+                            await self._discard(fid)
+                owned = sum(1 for flow in self.flows.values() if flow["owner"] == owner)
+                if owned >= MAX_FLOWS_PER_OWNER:
+                    raise HTTPException(429, f"同时等待授权的数量已达上限（{MAX_FLOWS_PER_OWNER}），请先完成或关闭一部分")
+            else:
+                await self.cancel_owner(owner)
             client = self._client(r)
             try:
                 obj = self.envelope(await client.post(
@@ -138,11 +175,12 @@ class BrowserLogin:
                 self._check_url(url, state, r)
                 fid = secrets.token_urlsafe(24)
                 flow = {"owner": owner, "state": state, "client": client, "name": name, "realm": r,
-                        "region": region, "expires": self.clock() + TTL, "lock": asyncio.Lock(),
+                        "region": region, "slot": slot, "bare": bool(slot and not region),
+                        "expires": self.clock() + TTL, "lock": asyncio.Lock(),
                         "next_poll": 0, "tokens": None, "saved": None, "provision": ""}
                 self.flows[fid] = flow
                 return {"id": fid, "url": url, "expires_at": int(flow["expires"] * 1000), "interval": 3,
-                        "realm": r, "region": region}
+                        "realm": r, "region": region, "slot": slot}
             except BaseException:
                 await client.aclose()
                 raise
@@ -234,7 +272,15 @@ class BrowserLogin:
             doc = {"account": {k: acct.get(k, "") for k in ["uid", "enterpriseId", "nickname"]}, "auth": auth}
             # 供给必须在落盘之前：未注册地区的国际版账号一旦进池，聊天就报
             # 14017，而那时已经没有 accessToken 之外的补救入口了。
-            note = await global_region.provision(client, auth, flow.get("region"))
+            #
+            # 批量扫码没有「选地区」这一步（一次摆 50 张码，让用户逐格选地区
+            # 不现实），所以 region 为空时不能沿用单账号那句「请选择地区后重新
+            # 登录」——那句话在批量语义下等于死路。改成自动注册到默认地区，
+            # 用户事后可以在账号行上改。
+            region = flow.get("region")
+            if not region and flow.get("bare") and auth["realm"] == realm_mod.GLOBAL:
+                region = DEFAULT_BATCH_REGION
+            note = await global_region.provision(client, auth, region)
             flow["provision"] = note
             flow["saved"] = self.save_account(doc, flow["name"])
             flow["tokens"] = None
@@ -243,4 +289,6 @@ class BrowserLogin:
             result = {"status": "success", **flow["saved"]}
             if note:
                 result["message"] = note
+            if region:
+                result["region"] = region
             return result
