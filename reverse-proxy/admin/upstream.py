@@ -131,5 +131,16 @@ def is_unauthorized(env):
 
 
 def request(client, url, method, headers, body=None):
-    """发一次请求并折成信封。"""
+    """发一次请求并折成信封（**同步**）。
+
+    刻意保持同步：账号池的 `client_factory` 默认是 `httpx.Client`
+    （`pool.py:297`），`operate / tick / batch` 这一整条链路都是同步的，
+    再套 `asyncio.to_thread`。把这里改成 async 会连带把 travel.py、
+    report.py、pool.py 全部改成协程，属无收益的大改造。
+
+    唯一的呼号：**浏览器登录链路（`browser_login` / `global_region`）走的是
+    `httpx.AsyncClient`**，那边必须用 `await client.request(...)`，
+    不能复用这个同步函数 —— 否则拿到的是协程对象，然后在 `envelope()`
+    里炸 `AttributeError: 'coroutine' object has no attribute 'json'`。
+    """
     return envelope(client.request(method, url, headers=headers, json=body))

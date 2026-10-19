@@ -122,7 +122,7 @@ def travel_status(client, headers):
 def travel_depart(client, headers, location_id):
     """派发一次（POST depart）。返回 `{ok, state}` 或 `{ok: False, code, message}`。"""
     env = _send(client, "POST", PREFIX + "/depart",
-                _web_headers(headers), {"location_id": location_id})
+                      _web_headers(headers), {"location_id": location_id})
     if ok(env):
         data = env.get("data") or {}
         return {"ok": True, "state": str(data.get("state") or "traveling")}
@@ -297,11 +297,18 @@ class TravelRunner:
 
     # ── 请求层 ──────────────────────────────────────────────────────────
     def _call(self, aid, method, path, body=None):
+        """发一次请求；未授权时刷新凭据重试一次。
+
+        **必须 async 并 `_send`**：`ctx.client_for(aid)` 产出的是
+        `httpx.AsyncClient`，它的 `.request()` 返回协程。同步写法会拿到协程对象
+        并在 `upstream.envelope()` 里炸 AttributeError —— 表现为「派发全失败」，
+        但错误文案里会带上一串与旅行无关的 coroutine 提示。
+        """
         with self.ctx.client_for(aid) as client:
             env = _send(client, method, path, _web_headers(self.ctx.headers_for(aid)), body)
             if is_unauthorized(env) and self.ctx.refresh_account(aid):
                 env = _send(client, method, path,
-                            _web_headers(self.ctx.headers_for(aid)), body)
+                                  _web_headers(self.ctx.headers_for(aid)), body)
         return env
 
     def _get(self, aid, path):
@@ -442,7 +449,7 @@ class TravelRunner:
 
     def _claim(self, aid, result, record_id):
         env = self._post(aid, PREFIX + "/claim",
-                         {"record_id": record_id} if record_id > 0 else {})
+                               {"record_id": record_id} if record_id > 0 else {})
         if not ok(env):
             result["ok"] = False
             result["claimed"] = False

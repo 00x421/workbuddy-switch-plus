@@ -5,9 +5,14 @@ from unittest.mock import Mock
 import httpx
 from fastapi import HTTPException
 
-from admin.browser_login import BASE, BrowserLogin
+from admin.browser_login import BrowserLogin
+from admin.realm import CN_CHAT_BASE, GLOBAL_BASE
 import test_admin_server as admin_tests
 from test_admin_server import credential
+
+# 国内版 chat 基址（等价于旧版模块级常量 BASE，改名是为了让“按 realm 分派”
+# 这件事在源码里就无法被忽略）。
+BASE = CN_CHAT_BASE
 
 
 class BrowserLoginTests(unittest.IsolatedAsyncioTestCase):

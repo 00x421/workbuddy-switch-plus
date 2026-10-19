@@ -135,7 +135,7 @@ def send_one(client, headers, event):
 
 
 def report(client, headers, count=DEFAULT_REPORTS, now_ms=None,
-           sleep=time.sleep, gap=REPORT_GAP_SECONDS):
+                 sleep=time.sleep, gap=REPORT_GAP_SECONDS):
     """跑一轮上报，返回 `{ok, sent, count, conversationId, message}`。
 
     逐条发、逐条判：某一条失败就停在本号，不把剩下的续发出去——续发既没必要

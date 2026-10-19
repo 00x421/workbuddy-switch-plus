@@ -177,7 +177,11 @@ def test_real_machine_catalog_has_v41_flash(monkeypatch):
     assert "deepseek-v4.1-flash" in catalog
     entry = catalog["deepseek-v4.1-flash"]
     assert entry["max_output_tokens"]
-    assert entry["context_window"]
+    # 断言"上下文窗口"要看 max_input_tokens，不是 context_window：
+    # context_window 来自上游的 contextWindow.defaultLength（用户可选的档位），
+    # 绝大多数模型条目根本不带这个键，全表 43 个模型这个字段都是 None。
+    # 真正表达"这个模型能塞多少上下文"的字段是 maxInputTokens → max_input_tokens。
+    assert entry["max_input_tokens"]
     assert entry["credit_rate"] is not None
     # 模型中心的清单必须与 /v1/models 完全一致（两边判据是同一个）
     assert set(catalog) == set(converter.get_available_models())

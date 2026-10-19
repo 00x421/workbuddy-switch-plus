@@ -2,6 +2,13 @@
 const $ = id => document.getElementById(id);
 let csrf = "", overview = null, pendingConfirm = null, page = "dashboard", busy = false;
 let accountMode = "browser", oauthFlow = null, oauthTimer = null, oauthGeneration = 0;
+// 账号版本（realm）与地区：只在浏览器登录模式下有意义，用来分派上游端点。
+// 必须是「生成链接时」的意图，不能从已有账号推断——用户可能正在加一个不同版本的新号。
+let accountRealm = "cn", accountRegion = "HK";
+const REGIONS = [
+  ["HK", "中国香港"], ["MO", "中国澳门"], ["SG", "新加坡"],
+  ["TH", "泰国"], ["PH", "菲律宾"], ["MY", "马来西亚"], ["ID", "印度尼西亚"],
+];
 let requestLogs = null, egressData = null;
 /* 账号池状态 → [中文, 色调]。原先这份表是 renderAccounts 里的局部变量，名字还叫 `labels`
    ——和全局的页面标题表同名，容易看串；提出来两处共用。 */
@@ -22,6 +29,7 @@ const labels = {
 /* 线性图标。原先用 👁 / 🙈 emoji，与整页的线性描边风格不一致，也受系统 emoji 字体影响。 */
 const ICON_EYE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.2 12S5.6 5.6 12 5.6 21.8 12 21.8 12 18.4 18.4 12 18.4 2.2 12 2.2 12Z"/><circle cx="12" cy="12" r="3"/></svg>';
 const ICON_EYE_OFF = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 7.4C2.9 9 2.2 12 2.2 12s3.4 6.4 9.8 6.4c1.5 0 2.8-.33 3.95-.85"/><path d="M9.6 5.9A9.7 9.7 0 0 1 12 5.6c6.4 0 9.8 6.4 9.8 6.4a17 17 0 0 1-2.6 3.5"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="M3.2 3.2 20.8 20.8"/></svg>';
+const ICON_COPY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
 const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const stamp = ts => ts ? new Date(ts).toLocaleString("zh-CN", {hour12:false}) : "未提供";
 function toast(message) { $("toast").textContent = message; $("toast").hidden = false; clearTimeout(toast.timer); toast.timer = setTimeout(() => $("toast").hidden = true, 4500); }
@@ -168,7 +176,7 @@ function render() {
     // 用 || 会让它退到默认值，用户就永远清不掉已填的地址。
     $("wb2api-base").value = overview.pool?.wb2api_base ?? ""; $("wb2api-key").value = overview.pool?.wb2api_key ?? "";
   }
-  const keyRow = k => `<tr><td><strong>${esc(k.name)}</strong>${k.realm ? `<small class="cell-note">${k.realm === "cn" ? "仅国内版" : "仅国际版"}</small>` : ""}</td><td><div class="secret-cell"><code data-secret="${esc(k.secret || k.hint)}" data-hidden="1">${esc(k.secret ? "•".repeat(12) : k.hint)}</code><button class="text-button reveal" data-reveal="${k.id}" title="显示 / 隐藏密钥" aria-label="显示或隐藏密钥">${ICON_EYE}</button></div></td><td>${keyStateCell(k)}</td><td class="muted mono">${esc(stamp(k.created * 1000))}</td><td>${groupTags(k.groups)}</td><td>${keyLimitCell(k)}</td><td class="align-right"><div class="actions"><button data-edit-key="${esc(k.id)}">编辑</button><button class="danger" data-revoke="${k.id}">撤销</button></div></td></tr>`;
+  const keyRow = k => `<tr><td><strong>${esc(k.name)}</strong>${k.realm ? `<small class="cell-note">${k.realm === "cn" ? "仅国内版" : "仅国际版"}</small>` : ""}</td><td><div class="secret-cell"><code data-secret="${esc(k.secret || k.hint)}" data-hidden="1">${esc(k.secret ? "•".repeat(12) : k.hint)}</code><button class="text-button reveal" data-reveal="${k.id}" title="显示 / 隐藏密钥" aria-label="显示或隐藏密钥">${ICON_EYE}</button>${k.secret ? `<button class="text-button" data-copy-key="${k.id}" title="复制密钥" aria-label="复制密钥">${ICON_COPY}</button>` : ""}</div></td><td>${keyStateCell(k)}</td><td class="muted mono">${esc(stamp(k.created * 1000))}</td><td>${groupTags(k.groups)}</td><td>${keyLimitCell(k)}</td><td class="align-right"><div class="actions"><button data-edit-key="${esc(k.id)}">编辑</button><button class="danger" data-revoke="${k.id}">撤销</button></div></td></tr>`;
   $("keys-body").innerHTML = keys.map(keyRow).join("")
     || '<tr><td colspan="7" class="history-empty">还没有密钥。</td></tr>';
   const selected = $("model").value || overview.default_model || "deepseek-v4.1-flash";
@@ -331,9 +339,13 @@ function renderAccounts() {
        注意别把 null 渲染成 0 —— 那是最容易被误读成「没额度了」的一种。 */
     const enterprise = a.is_enterprise
       ? `<span class="mini-enterprise" title="企业版账号：配额与企业组织共享">企业版</span>` : "";
+    // 国际版必须显式标出来：它走的是另一套上游，没注册地区会报 14017，
+    // 不标版本的话用户会以为「这个号坏了」而不是「这个号缺地区注册」。
+    const realmBadge = a.realm === "global"
+      ? `<span class="mini-enterprise mini-realm" title="国际版账号：走 workbuddy.ai，首次使用需注册地区">国际版</span>` : "";
     const credits = a.remaining === null || a.remaining === undefined ? "—" : Number(a.remaining).toLocaleString("zh-CN",{maximumFractionDigits:2});
     const creditNote = a.is_enterprise ? "企业配额" : (a.credits_updated ? esc(stamp(a.credits_updated*1000)) : "点击查询积分");
-    return `<tr><td><div class="account-cell"><span class="account-icon">${esc(a.name.slice(0,1))}</span><div><strong>${esc(a.name)}${a.active ? '<span class="mini-active">手动 / 测试账号</span>' : ""}${enterprise}</strong><small>${esc(a.uid || a.nickname)}</small></div></div></td><td><span class="pill ${status[1]}">${status[0]}</span><small class="cell-note">${a.today_checked_in ? "今日已签到" : "今日未确认签到"}</small>${travelNote(a)}${activeNote(a)}${a.cooldown_until > Date.now()/1000 ? `<small class="cell-note">至 ${esc(stamp(a.cooldown_until*1000))}</small>` : ""}${upstreamNote(a)}</td><td><strong class="credit-number">${credits}</strong><small class="cell-note">${creditNote}${a.credits_stale && a.credits_updated ? " · 待刷新" : ""}</small>${a.last_error ? `<small class="cell-note field-error">${esc(a.last_error)}</small>` : ""}</td><td class="mono">${esc(stamp(a.expires_at))}<small class="cell-note">${a.expired ? "已到期 · 调用时尝试刷新" : "支持自动刷新"}</small></td><td><div class="actions pool-actions">${a.enabled ? `<button data-action="status" data-id="${a.id}" title="查询积分与签到状态">查询积分</button><button data-action="checkin" data-id="${a.id}">签到</button><button data-action="travel" data-id="${a.id}" title="按状态机派一次猫猫旅行；已在旅途中会提示">派旅行</button><button data-action="travel-claim" data-id="${a.id}" title="回查官方状态，到点则领奖">领奖</button><button data-action="active" data-id="${a.id}" title="向上游发送一条 chat_request_send 事件，点亮 growth 连登">活跃</button><button data-action="refresh" data-id="${a.id}">刷新凭据</button>` : ""}${a.enabled && !a.active ? `<button data-action="activate" data-id="${a.id}">设为手动 / 测试</button>` : ""}<button data-action="rename" data-id="${a.id}">备注</button><button data-action="toggle" data-id="${a.id}">${a.enabled ? "暂停" : "恢复"}</button><button class="danger" data-action="delete" data-id="${a.id}">删除</button></div></td></tr>`;
+    return `<tr><td><div class="account-cell"><span class="account-icon">${esc(a.name.slice(0,1))}</span><div><strong>${esc(a.name)}${a.active ? '<span class="mini-active">手动 / 测试账号</span>' : ""}${enterprise}${realmBadge}</strong><small>${esc(a.uid || a.nickname)}</small></div></div></td><td><span class="pill ${status[1]}">${status[0]}</span><small class="cell-note">${a.today_checked_in ? "今日已签到" : "今日未确认签到"}</small>${travelNote(a)}${activeNote(a)}${a.cooldown_until > Date.now()/1000 ? `<small class="cell-note">至 ${esc(stamp(a.cooldown_until*1000))}</small>` : ""}${upstreamNote(a)}</td><td><strong class="credit-number">${credits}</strong><small class="cell-note">${creditNote}${a.credits_stale && a.credits_updated ? " · 待刷新" : ""}</small>${a.last_error ? `<small class="cell-note field-error">${esc(a.last_error)}</small>` : ""}</td><td class="mono">${esc(stamp(a.expires_at))}<small class="cell-note">${a.expired ? "已到期 · 调用时尝试刷新" : "支持自动刷新"}</small></td><td><div class="actions pool-actions">${a.enabled ? `<button data-action="status" data-id="${a.id}" title="查询积分与签到状态">查询积分</button><button data-action="checkin" data-id="${a.id}">签到</button><button data-action="travel" data-id="${a.id}" title="按状态机派一次猫猫旅行；已在旅途中会提示">派旅行</button><button data-action="travel-claim" data-id="${a.id}" title="回查官方状态，到点则领奖">领奖</button><button data-action="active" data-id="${a.id}" title="向上游发送一条 chat_request_send 事件，点亮 growth 连登">活跃</button><button data-action="refresh" data-id="${a.id}">刷新凭据</button>` : ""}${a.enabled && !a.active ? `<button data-action="activate" data-id="${a.id}">设为手动 / 测试</button>` : ""}<button data-action="rename" data-id="${a.id}">备注</button><button data-action="toggle" data-id="${a.id}">${a.enabled ? "暂停" : "恢复"}</button><button class="danger" data-action="delete" data-id="${a.id}">删除</button></div></td></tr>`;
   }).join("") || (overview.accounts.length ? '<tr><td colspan="5" class="muted">没有符合筛选条件的账号。</td></tr>' : "");
 }
 /* ---------- 上游分组 ---------- */
@@ -954,7 +966,40 @@ function setAccountMode(mode) {
 }
 $("mode-browser").addEventListener("click", () => setAccountMode("browser"));
 $("mode-file").addEventListener("click", () => setAccountMode("file"));
-$("account-dialog").addEventListener("close", () => { clearOAuth(); $("account-form").reset(); $("file-label").textContent = "选择或拖入 .info / .json 文件"; $("account-error").textContent = ""; });
+$("account-dialog").addEventListener("close", () => { clearOAuth(); $("account-form").reset(); $("file-label").textContent = "选择或拖入 .info / .json 文件"; $("account-error").textContent = ""; accountRealm = "cn"; accountRegion = "HK"; renderRealm(); });
+function renderRegions() {
+  const box = $("region-options");
+  box.textContent = "";
+  REGIONS.forEach(([code, label]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.setAttribute("aria-pressed", String(accountRegion === code));
+    button.addEventListener("click", () => { accountRegion = code; renderRegions(); });
+    box.appendChild(button);
+  });
+}
+
+function renderRealm() {
+  $("realm-cn").setAttribute("aria-pressed", String(accountRealm === "cn"));
+  $("realm-global").setAttribute("aria-pressed", String(accountRealm === "global"));
+  $("region-picker").hidden = accountRealm !== "global";
+  if (accountRealm === "global") renderRegions();
+}
+
+function setRealm(realm) {
+  if (accountRealm === realm) return;
+  // 换版本一定要重开链接：旧 flow 打的是另一套上游，继续轮询必然拿不到结果，
+  // 而且表现为「一直等待登录」，看不出是选错了版本。
+  clearOAuth();
+  accountRealm = realm;
+  renderRealm();
+  $("account-error").textContent = "";
+}
+
+$("realm-cn").addEventListener("click", () => setRealm("cn"));
+$("realm-global").addEventListener("click", () => setRealm("global"));
+
 function openAccount() { setAccountMode("browser"); $("account-dialog").showModal(); }
 async function pollOAuth(generation) {
   if (generation !== oauthGeneration || !oauthFlow) return;
@@ -982,7 +1027,11 @@ $("oauth-start").addEventListener("click", async () => {
   $("oauth-start").disabled = true; $("oauth-start").textContent = "正在生成…";
   $("account-error").textContent = "";
   try {
-    const flow = await api("oauth/start", {method:"POST",body:{name:$("account-name").value.trim() || undefined}});
+    const flow = await api("oauth/start", {method:"POST",body:{
+      name: $("account-name").value.trim() || undefined,
+      realm: accountRealm,
+      region: accountRealm === "global" ? accountRegion : undefined,
+    }});
     if (generation !== oauthGeneration) { api("oauth/" + flow.id, {method:"DELETE"}).catch(() => {}); return; }
     oauthFlow = flow; $("oauth-open").href = flow.url; $("oauth-link-box").hidden = false;
     $("oauth-start").textContent = "重新生成链接"; $("account-name").disabled = true;
@@ -1055,6 +1104,19 @@ function onKeyTableClick(e) {
     code.textContent = hidden ? k.secret : "•".repeat(12);
     code.dataset.hidden = hidden ? "0" : "1";
     eye.innerHTML = hidden ? ICON_EYE_OFF : ICON_EYE;
+    return;
+  }
+  // 复制：直接从 overview 取明文，不依赖单元格当前是否已展开 —— 用户想复制时
+  // 不该被迫先点眼睛把明文摊在屏幕上。
+  const cp = e.target.closest("[data-copy-key]");
+  if (cp) {
+    const k = overview.keys.find(x => x.id === cp.dataset.copyKey);
+    if (!k) return;
+    if (!k.secret) {
+      toast("这个密钥创建于旧版本，明文未保存，无法复制；请重新创建一个。");
+      return;
+    }
+    copy(k.secret);
     return;
   }
   const b = e.target.closest("[data-revoke]");
@@ -1180,7 +1242,66 @@ $("key-form").addEventListener("submit", async e => {
     button.disabled = false;
   }
 });
-async function copy(value) { try { await navigator.clipboard.writeText(value); toast("已复制"); } catch { toast("无法自动复制，请手动选择文本复制"); } }
+/* 复制到剪贴板。**必须有降级链** —— 只调 navigator.clipboard 会在明文 HTTP 下
+   静默失效。
+
+   `navigator.clipboard` 是 Secure Context 专属 API：只有 HTTPS 或
+   localhost/127.0.0.1 才存在。用户用 `http://192.168.1.x:8787/admin/` 打开时
+   它是 undefined，`writeText` 直接抛 TypeError ── 而 open 到局域网恰恰是 0.1.2
+   的主打功能，等于一开就全废。
+
+   三条路按可靠性依次尝试：
+     1. navigator.clipboard   —— 最干净，仅安全上下文
+     2. execCommand("copy")   —— 已废弃但明文 HTTP 下仍可用，是这里的关键
+     3. 选中文本 + 提示手动复制 —— 前两条都失败时的兜底，至少让用户能 Ctrl+C
+*/
+function legacyCopy(text) {
+  // execCommand 要求目标在文档里且被选中；用一个不可见的 textarea，
+  // 且必须真实可见区域外定位（display:none 会让选区失效）。
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:0;left:-9999px;opacity:0";
+  document.body.appendChild(ta);
+  const previous = document.activeElement;
+  ta.select();
+  ta.setSelectionRange(0, text.length);
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  document.body.removeChild(ta);
+  if (previous && previous.focus) previous.focus();
+  return ok;
+}
+
+/** 最后兜底：把文本选中，让用户能 Ctrl+C。返回 false 表示确实做不到。 */
+function selectForManualCopy(text) {
+  const probe = document.createElement("textarea");
+  probe.value = text;
+  probe.style.cssText = "position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:min(560px,80vw);height:120px;z-index:9999";
+  document.body.appendChild(probe);
+  probe.focus();
+  probe.select();
+  return true;
+}
+
+async function copy(value) {
+  const text = String(value == null ? "" : value);
+  if (!text) { toast("没有可复制的内容"); return false; }
+  // 1. 现代 API：存在就试，失败再往下走（存在不代表可用，权限被拒也会抛）
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("已复制");
+      return true;
+    } catch { /* 落到下面 */ }
+  }
+  // 2. 明文 HTTP 下的实际主力
+  if (legacyCopy(text)) { toast("已复制"); return true; }
+  // 3. 都失败：选中给用户手动复制
+  selectForManualCopy(text);
+  toast("无法自动复制，文本已选中，请按 Ctrl+C");
+  return false;
+}
 $("copy-key").addEventListener("click", () => copy($("new-key-value").textContent));
 document.querySelectorAll("[data-copy]").forEach(b => b.addEventListener("click", () => copy(b.dataset.copy)));
 $("base-url").textContent = location.origin + "/v1"; $("anthropic-url").textContent = location.origin;

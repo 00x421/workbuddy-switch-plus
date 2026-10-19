@@ -24,6 +24,7 @@ from . import assets
 from . import egress
 from . import groups
 from . import keysvc
+from . import realm as realm_mod
 from . import settings_store
 from . import version as _version
 from . import keyexport
@@ -140,6 +141,15 @@ class Store:
             value = doc["account"].get(key, "")
             if not isinstance(value, str) or "\r" in value or "\n" in value:
                 raise HTTPException(400, "账号字段格式不正确")
+        # realm 允许缺省：存量 .info（本服务升级前导出，或旧版桌面端导出）
+        # 里没有这个字段，靠 domain 兜底判归属。**不要在这里填默认值**，
+        # 否则会把“未声明”和“声明为国内版”混为一谈，写入时反而多出字段。
+        realm = doc["auth"].get("realm")
+        if realm is not None:
+            if not isinstance(realm, str) or "\r" in realm or "\n" in realm:
+                raise HTTPException(400, "凭据包含无效字段")
+            if realm_mod.norm_realm(realm) != realm.strip().lower():
+                raise HTTPException(400, "凭据 realm 取值无效（只接受 cn / global）")
 
     def save(self):
         write_json(self.path, self.data)
@@ -147,13 +157,24 @@ class Store:
     def save_browser_account(self, doc, name):
         self.validate_credential(doc)
         with self.lock:
-            identity = (doc["account"]["uid"], doc["account"].get("enterpriseId", ""))
+            # 身份三元组，不是二元组。
+            #
+            # 只按 (uid, enterpriseId) 匹配会出错：同一个 uid 在国内版与国际版
+            # 是**两个不同的账号**（额度、套餐、trial 都各自独立），而国际版账号
+            # 的 enterpriseId 语义与国内版并不对齐（有的为空、有的给租户号）。
+            # 结果就是重新登录一个已有的国际服账号时匹配不上，新建一条 id，
+            # 旧记录仍占着 active —— 界面上表现为「切换后显示未选中账号」，
+            # 而且旧记录的 token 可能还是有效的，池里于是出现两条同 uid 记录，
+            # 轮询到哪条全看顺序。
+            identity = (doc["account"]["uid"], doc["account"].get("enterpriseId", ""),
+                        realm_mod.realm_of(doc.get("auth") or {}))
             for aid, item in self.data["accounts"].items():
                 try:
                     old = json.loads(self.file_for(item).read_text(encoding="utf-8"))
                 except (ValueError, OSError):
                     continue
-                if (old.get("account", {}).get("uid"), old.get("account", {}).get("enterpriseId", "")) == identity:
+                if (old.get("account", {}).get("uid"), old.get("account", {}).get("enterpriseId", ""),
+                        realm_mod.realm_of(old.get("auth") or {})) == identity:
                     current = self.manager_for(aid, item)
                     if current:
                         with current._lock:
@@ -206,11 +227,16 @@ class Store:
                 # 企业版标记：企业账号的配额不走个人版资源接口，界面要能看出来。
                 # `enterpriseId` 由浏览器登录链路与导入链路写入，个人账号为空。
                 enterprise_id = str(account.get("enterpriseId") or account.get("enterprise_id") or "")
+                # 归属：显式 realm 优先，缺省的存量账号按 domain 兜底。
+                # 界面靠它区分「国内版」与「国际版」，也靠它决定要不要显示
+                # 地区注册入口——国际版没注册地区的号聊天会报 14017。
+                account_realm = realm_mod.realm_of(doc.get("auth") or {})
                 row.update({"nickname": str(account.get("nickname") or ""), "uid": str(account.get("uid") or ""), "expires_at": expiry, "expired": expiry < time.time() * 1000, "refresh_available": bool(doc["auth"].get("refreshToken")), "status": "ready",
-                            "is_enterprise": bool(enterprise_id), "enterprise_id": enterprise_id})
+                            "is_enterprise": bool(enterprise_id), "enterprise_id": enterprise_id,
+                            "realm": account_realm})
             except (ValueError, OSError, KeyError):
                 row.update({"status": "invalid", "expired": True, "expires_at": 0, "refresh_available": False,
-                            "is_enterprise": False, "enterprise_id": ""})
+                            "is_enterprise": False, "enterprise_id": "", "realm": realm_mod.CN})
             result.append(row)
         return result
 
@@ -879,9 +905,14 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
         admin(req)
         body = await payload(req)
         name = clean_name(body.get("name"), None)
+        # realm/region 从 body 取：这是“这一版登录”的意图，不是账号的持久属性。
+        # 允许 query 兜底只是为了 curl 方便；body 优先，避免管理端顺手加个同名
+        # query 就把 body 静默盖掉（上游踩过这个坑）。
+        realm = realm_mod.norm_realm(body.get("realm") or req.query_params.get("realm"))
+        region = body.get("region") or req.query_params.get("region")
         owner, _ = bearer_session(req)
         try:
-            return await browser_login.start(digest(owner), name)
+            return await browser_login.start(digest(owner), name, realm, region)
         except (httpx.HTTPError, ValueError, TypeError):
             raise HTTPException(502, "授权服务连接失败，请稍后重试")
 

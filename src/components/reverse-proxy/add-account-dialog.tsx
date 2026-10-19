@@ -5,11 +5,12 @@ import { FileUp, Globe } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { rp } from "@/lib/reverse-proxy";
+import { rp, RP_REGIONS, realmOfVariant } from "@/lib/reverse-proxy";
 import { cn } from "@/lib/utils";
 import { Banner, Field } from "./rp-shared";
 
 type Mode = "browser" | "file";
+type Realm = "cn" | "global";
 
 export function AddAccountDialog({ open, onOpenChange, onAdded }: {
   open: boolean;
@@ -17,6 +18,8 @@ export function AddAccountDialog({ open, onOpenChange, onAdded }: {
   onAdded: () => void;
 }) {
   const [mode, setMode] = useState<Mode>("browser");
+  const [realm, setRealm] = useState<Realm>("cn");
+  const [region, setRegion] = useState("HK");
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -48,6 +51,8 @@ export function AddAccountDialog({ open, onOpenChange, onAdded }: {
     if (!open) {
       resetFlow(true);
       setMode("browser");
+      setRealm("cn");
+      setRegion("HK");
       setName("");
       setError("");
       setFileLabel("");
@@ -93,7 +98,11 @@ export function AddAccountDialog({ open, onOpenChange, onAdded }: {
     const generation = genRef.current;
     setBusy(true);
     try {
-      const next = await rp.oauthStart(name.trim() || undefined);
+      const next = await rp.oauthStart(
+        name.trim() || undefined,
+        realmOfVariant(realm),
+        realm === "global" ? region : undefined,
+      );
       if (generation !== genRef.current) {
         void rp.oauthCancel(next.id).catch(() => undefined);
         return;
@@ -158,6 +167,46 @@ export function AddAccountDialog({ open, onOpenChange, onAdded }: {
 
         {mode === "browser" ? (
           <div className="flex flex-col gap-3">
+            {/* 版本选择必须放在「生成链接」之前：上游的登录域与平台参数完全按版本
+                分派，选错了拿到的是另一套二维码，而且不会报错（manager 里踩过）。 */}
+            <div className="flex flex-col gap-2">
+              <span className="text-xs font-medium">账号版本</span>
+              <div className="flex gap-2">
+                {([["cn", "国内版 CodeBuddy"], ["global", "国际版 WorkBuddy AI"]] as const).map(([value, label]) => (
+                  <Button
+                    key={value}
+                    type="button"
+                    variant={realm === value ? "default" : "outline"}
+                    size="sm"
+                    disabled={Boolean(flow) || busy}
+                    onClick={() => { setRealm(value); setError(""); resetFlow(true); }}
+                  >
+                    {label}
+                  </Button>
+                ))}
+              </div>
+              {realm === "global" ? (
+                <div className="flex flex-col gap-1">
+                  <span className="text-xs font-medium">地区 <span className="text-muted-foreground">（首次登录必须选，否则聊天报 14017）</span></span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {RP_REGIONS.map((item) => (
+                      <Button
+                        key={item.code}
+                        type="button"
+                        variant={region === item.code ? "default" : "outline"}
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        disabled={Boolean(flow) || busy}
+                        onClick={() => { setRegion(item.code); setError(""); }}
+                      >
+                        {item.label}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
             <ol className="flex flex-col gap-2 text-xs text-muted-foreground">
               <li><b className="text-foreground">1.</b> 生成专属链接，在官方页面扫码或登录。</li>
               <li><b className="text-foreground">2.</b> 返回这里保持窗口打开，系统会自动获取授权结果。</li>

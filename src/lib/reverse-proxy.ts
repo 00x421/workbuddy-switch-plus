@@ -114,7 +114,40 @@ function extractDetail(data: unknown): string {
 }
 
 // ── 类型 ──────────────────────────────────────────────────────────────
+/**
+ * 服务端的上游版本代号。**刻意不用前端的 WbVariant（cn/ai）**：
+ * 服务端落盘的字段就叫 realm，而且它额外有 `ai` 这个历史别名需要归一化。
+ * 界面上做选择用 WbVariant，发请求前一律过 `realmOfVariant()` 转换。
+ */
+export type RpRealm = "cn" | "global";
+
+/** 国际版可选地区（派发给服务端的 IOS2 短码，与服务端 REGION_CODES 一致）。 */
+export const RP_REGIONS: ReadonlyArray<{ code: string; label: string }> = [
+  { code: "HK", label: "中国香港" },
+  { code: "MO", label: "中国澳门" },
+  { code: "SG", label: "新加坡" },
+  { code: "TH", label: "泰国" },
+  { code: "PH", label: "菲律宾" },
+  { code: "MY", label: "马来西亚" },
+  { code: "ID", label: "印度尼西亚" },
+];
+
 export type RpSession = { username: string; role: "admin" | "viewer" | string; via?: string };
+
+/**
+ * 界面档位 → 服务端 realm。
+ *
+ * 两套命名不同不是笔误：前端从桌面端继承的是 `cn/ai`，服务端落盘字段叫
+ * `realm` 且取值 `cn/global`。转换只在这一处做，别在各组件里散着写三目。
+ */
+export function realmOfVariant(variant: string | undefined): RpRealm {
+  return variant === "ai" || variant === "global" ? "global" : "cn";
+}
+
+/** 服务端 realm → 界面档位（展示用）。 */
+export function variantOfRealm(realm: string | undefined): "cn" | "ai" {
+  return realm === "global" || realm === "ai" ? "ai" : "cn";
+}
 
 export type RpAccount = {
   id: string; name: string; enabled: boolean; active: boolean; realm?: string;
@@ -591,8 +624,10 @@ export const rp = {
   auditLogs: (limit = 200) => request<RpAuditLog[]>(`audit-logs?limit=${limit}`),
   clearAuditLogs: () => request<{ ok: boolean; removed: number }>("audit-logs/clear", { method: "POST" }),
 
-  oauthStart: (name?: string) => request<{ id: string; url: string; expires_at: number }>("oauth/start", { method: "POST", body: { name } }),
-  oauthPoll: (id: string) => request<{ status: string; updated?: boolean }>(`oauth/${id}/poll`, { method: "POST" }),
+  oauthStart: (name?: string, realm?: RpRealm, region?: string) =>
+    request<{ id: string; url: string; expires_at: number; realm?: string; region?: string }>(
+      "oauth/start", { method: "POST", body: { name, realm, region } }),
+  oauthPoll: (id: string) => request<{ status: string; updated?: boolean; message?: string }>(`oauth/${id}/poll`, { method: "POST" }),
   oauthCancel: (id: string) => request<{ ok: boolean }>(`oauth/${id}`, { method: "DELETE" }),
 
   testModel: (model: string, prompt: string) =>
