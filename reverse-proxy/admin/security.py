@@ -38,6 +38,8 @@ MAX_TRACKED = 5000
 AUDIT_LIMIT = 500
 SESSION_TTL = 12 * 3600
 LAST_USED_THROTTLE = 60
+SESSION_CAP = 100        # 活跃会话上限；到顶后只顶同来源最早的那张
+ISSUE_WINDOW = 1800      # 换票速率的观测窗口（秒）
 
 
 def digest(value: str) -> str:
@@ -51,6 +53,22 @@ def bearer_session(req: Request) -> tuple[str, bool]:
     """
     token = req.headers.get("X-Admin-Token", "")
     return (token or req.cookies.get(COOKIE, "")), bool(token)
+
+
+def bearer_session_from_headers(headers: dict[str, str]) -> tuple[str, bool]:
+    """同 `bearer_session`，但吃的是**已小写化**的裸头部字典。
+
+    给中间件用：那里拿到的是 ASGI scope 里的原始字节，还没构造 Request。
+    """
+    token = headers.get("x-admin-token", "")
+    cookie = headers.get("cookie", "")
+    sid = ""
+    for part in cookie.split(";"):
+        name, _, value = part.strip().partition("=")
+        if name == COOKIE:
+            sid = value
+            break
+    return (token or sid), bool(token)
 
 
 def new_secret() -> str:
@@ -112,6 +130,11 @@ class Security:
         self.legacy_key_configured = bool(legacy_key_configured)
         self._fail: dict[str, list] = {}
         self._user_fail: dict[str, list] = {}
+        # 同一来源在 TTL 窗口内换过多少张票，**只用于观测**（`issue_rate()`），
+        # 不作为拒绝登录的依据。拒绝会让「面板自己重登几次」变成用户看得见的失败，
+        # 而真正要挡的是「刚签发的票被顶掉」这件事本身——那个由容量上限的
+        # 淘汰口径负责（只踢同来源最早的那张）。
+        self._issue: dict[str, list[float]] = {}
         self.bootstrap()
 
     # ── 数据 ────────────────────────────────────────────────────────
@@ -348,6 +371,14 @@ class Security:
         except HTTPException as exc:
             record, session_err = None, exc
         if record:
+            # 会话是**绑在来源 IP 上的**。IP 管控一收紧，被挡住的来源就算手里
+            # 还留着也没用；这里再挡一次是纵深防御，因为会话与策略之间没有
+            # 强一致保证（策略可以在别的进程、别的机器上被改）。
+            bound = (record.get("ip") or "").strip()
+            if bound and bound != client_ip(req):
+                session_err = HTTPException(401, "会话与当前来源地址不一致，请重新登录")
+                record = None
+        if record:
             # role 缺省用 viewer，与其余几处一致。真出现缺 role 的记录时
             # 宁可降权 —— 这里默认 admin 等于「数据缺了就自动提权」。
             return {
@@ -388,25 +419,53 @@ class Security:
 
     # ── 会话 ────────────────────────────────────────────────────────
     def start_session(self, username: str, role: str, via: str = "session",
-                      token_id: str = "") -> tuple[str, str]:
+                      token_id: str = "", ip: str = "") -> tuple[str, str]:
         """建立会话，返回 (sid, csrf)。会话记录带 username/role/iat。
 
         `token_id` 只有「管理令牌换会话」这一条路会带。留着它是为了让后续每个请求
         都能回查令牌本身是否还有效（见 `_session_record`），否则撤销令牌之后，
         已经换出去的会话还能继续用满 12 小时。
+
+        `ip` 记下来源地址。IP 管控收紧时要靠它把「已被新策略挡在门外」的会话
+        一次性踢掉 —— 否则会出现「人已经进不来，令牌却还能调 API」这种
+        谁也解释不清的状态。空串表示未知来源，不参与按 IP 的清理。
         """
         sid, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         now = time.time()
+        source = (ip or "").strip()
         with self.store.lock:
+            # 只甩过期的；活跃会话一张都不甩。
+            #
+            # 这里以前是「`len(sessions) >= 100` 就 pop 掉最早插入的那张」，与来源
+            # 无关。它和「同一把管理密钥在 TTL 内反复换票」放在一起会互相咬住：
+            # 面板打开时并行发好几个请求（overview/accounts/keys/settings/logs），
+            # 某个响应 401 而另一个刚登录成功，前端就再登一次 —— 一次登录可能换
+            # 好几张票。攒到 100 张后，每换一张就把**别人**最早那张踢掉，表现成
+            # 「刚登录完再点一下又回登录页」，而且不报任何错。
+            # 现在淘汰口径是「先踢同一个来源最早签的那张」，绝不牵连别的来源。
             self.store.sessions = {k: v for k, v in self.store.sessions.items() if v["expires"] > now}
-            if len(self.store.sessions) >= 100:
-                self.store.sessions.pop(next(iter(self.store.sessions)))
+            if source:
+                recent = [t for t in self._issue.get(source, []) if (now - t) < ISSUE_WINDOW]
+                self._issue[source] = recent + [now]
+            while len(self.store.sessions) >= SESSION_CAP:
+                victim = None
+                for key, val in self.store.sessions.items():
+                    if self._session_ip(val) == source:
+                        victim = key
+                        break
+                if victim is None:
+                    victim = next(iter(self.store.sessions))
+                self.store.sessions.pop(victim, None)
             self.store.sessions[digest(sid)] = {
                 "csrf": csrf, "expires": now + SESSION_TTL,
                 "username": username, "role": role, "via": via, "iat": int(now),
-                "token_id": token_id,
+                "token_id": token_id, "ip": source,
             }
         return sid, csrf
+
+    @staticmethod
+    def _session_ip(record: dict) -> str:
+        return (record.get("ip") or "").strip()
 
     def end_session(self, req: Request) -> None:
         sid, _ = bearer_session(req)
@@ -445,6 +504,46 @@ class Security:
                 if (v.get("username") or "admin") != (username or "admin")
             }
             return before - len(self.store.sessions)
+
+    def session_ips(self) -> list[str]:
+        """当前所有活跃会话的来源 IP（去重，已过期的剔除）。
+
+        IP 管控收紧时用它决定「谁该被踢」。调用方必须把当前这次请求的来源排除掉：
+        **保存策略的那次请求本身就是「还进得来」的证据**，把它踢掉会让操作者
+        在点下保存的瞬间失去自己，而这时他已经点不到任何页面去救自己了。
+        """
+        now = time.time()
+        with self.store.lock:
+            return sorted({
+                (v.get("ip") or "").strip()
+                for v in self.store.sessions.values()
+                if v.get("expires", 0) > now and (v.get("ip") or "").strip()
+            })
+
+    def revoke_sessions_from(self, ip: str) -> int:
+        """踢掉**某个来源 IP** 名下的全部会话，返回踢掉的数量。
+
+        用于 IP 管控收紧的那一刻。会话是绑在来源 IP 上的（见 `start_session` 的注释），
+        所以一个已经被新策略挡在门外的来源，它手里那张票必须当场作废 —— 否则会
+        出现最难解释的一种状态：人已经被挡在门外了，令牌却还能一路调到 API。
+
+        更麻烦的是「被挡 == 401」这个耦合。`current_user()` 在会话资料够不着时
+        会顺手 `record_fail()`，几次下来就把这个 IP 送进 10 分钟登录锁定，
+        于是**撤掉规则之后连正确的口令都登不进来**。所以撤会话之外还要清掉
+        失败计数：这个人不是猜错口令，是网络不在名单里。
+        """
+        if not ip:
+            return 0
+        with self.store.lock:
+            before = len(self.store.sessions)
+            self.store.sessions = {
+                k: v for k, v in self.store.sessions.items()
+                if (v.get("ip") or "") != ip
+            }
+            dropped = before - len(self.store.sessions)
+        # 失败计数是内存里的，清了不会影响别的来源。
+        self._fail.pop(ip, None)
+        return dropped
 
     # ── 登录 ────────────────────────────────────────────────────────
     def verify_login(self, username: str, password: str) -> dict | None:

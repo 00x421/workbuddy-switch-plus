@@ -15,6 +15,10 @@
      "duration_ms", "first_token_ms",      # 累加值，均值由读取方自己除
      "by_model": {model: 计数}, "by_key": {kid: 计数}, "by_status": {status: n}}
 
+`by_model` / `by_key` 的每个 slot 额外带 `gen_ms` / `gen_samples`，用来算
+`输出 tok/s`（见 `generation_ms()`）。它们**不在顶层桶上累加**——顶层那份
+`duration_ms` 含失败请求和排队时间，拿来当分母会算出明显偏低的速率。
+
 时间基准用 `pool.clock()`（可注入的时钟），保证测试里能造出确定的时间轴。
 """
 from __future__ import annotations
@@ -57,7 +61,8 @@ def bucket_keys(now: float) -> tuple[str, str]:
     return day, f"{day}T{dt.strftime('%H')}"
 
 
-def _bump(counter: dict, name, calls: int, failed: int, tokens: int, credit: float) -> None:
+def _bump(counter: dict, name, calls: int, failed: int, tokens: int, credit: float,
+          gen_ms: int = 0) -> None:
     if not name:
         return
     name = str(name)[:64]
@@ -65,11 +70,42 @@ def _bump(counter: dict, name, calls: int, failed: int, tokens: int, credit: flo
     if slot is None:
         if len(counter) >= DIMENSION_KEEP:
             return  # 维度已经够散了，丢弃新维度比无限膨胀好
-        slot = counter[name] = {"calls": 0, "failed": 0, "tokens": 0, "credit": 0.0}
+        slot = counter[name] = {"calls": 0, "failed": 0, "tokens": 0, "credit": 0.0,
+                                "gen_ms": 0, "gen_samples": 0}
     slot["calls"] += calls
     slot["failed"] += failed
     slot["tokens"] += tokens
     slot["credit"] = round(slot["credit"] + credit, 6)
+    # 默认 0 让老的 slot（升级前写进 state.json 的，没有这两个键）能原地继续累加。
+    slot["gen_ms"] = int(slot.get("gen_ms", 0)) + int(gen_ms or 0)
+    if gen_ms > 0:
+        slot["gen_samples"] = int(slot.get("gen_samples", 0)) + 1
+
+
+def generation_ms(duration_ms, first_token_ms) -> int:
+    """这次调用真正"在生成"的那段时间，毫秒。不满足条件返回 0（=不参与均值）。
+
+    `输出 tok/s` 的分母就是它。三条规则，缺一条就会算出假数字：
+
+    1. **非流式请求没有首字时间**（`first_token_ms == 0`）。此时整段耗时里
+       绝大部分是生成本身，只能拿 `duration_ms` 顶替——算出来会偏低，
+       但不会凭空捏造。这不是"没数据"，是"数据粗一档"。
+    2. **首字时间必须早于总耗时**。大于等于说明这两个数根本不是同一次计时
+       （上游重试、时钟错位、或者只记了一半），相减会得到 0 或负数。
+    3. **拿不出正数就返回 0，不要返回 1 去凑一个巨大的速率。**
+    """
+    try:
+        total = int(duration_ms or 0)
+        first = int(first_token_ms or 0)
+    except (TypeError, ValueError):
+        return 0
+    if total <= 0:
+        return 0
+    if first <= 0:
+        return total
+    if first >= total:
+        return 0
+    return total - first
 
 
 def _add(bucket: dict, *, calls: int, failed: int, tokens: int, credit: float,
@@ -80,8 +116,14 @@ def _add(bucket: dict, *, calls: int, failed: int, tokens: int, credit: float,
     bucket["credit"] = round(bucket["credit"] + credit, 6)
     bucket["duration_ms"] += int(duration_ms or 0)
     bucket["first_token_ms"] += int(first_token_ms or 0)
-    _bump(bucket["by_model"], model, calls, failed, tokens, credit)
-    _bump(bucket["by_key"], key_id, calls, failed, tokens, credit)
+    # 吞吐样本的入选条件与 manager 同口径：成功（2xx）+ 真有输出 token + 生成耗时为正。
+    # 失败请求的耗时要摊进重试和排队，混进均值会把速率压成噪声；
+    # 0 token 的请求（纯探测、空回复）没有分母，也没有意义。
+    gen = 0
+    if failed == 0 and tokens > 0:
+        gen = generation_ms(duration_ms, first_token_ms)
+    _bump(bucket["by_model"], model, calls, failed, tokens, credit, gen)
+    _bump(bucket["by_key"], key_id, calls, failed, tokens, credit, gen)
 
     name = str(status)
     slot = bucket["by_status"].get(name)
@@ -149,6 +191,21 @@ def record(store, *, now: float, status: int, tokens: int = 0, credit: float = 0
         _prune(buckets, keep)
 
 
+def _throughput(slot: dict) -> dict:
+    """把某个维度的 gen_ms / gen_samples 折成 tok/s 与样本量。
+
+    样本量必须一起给出来：只报速率不报样本数，一个 2 次调用的模型和一个
+    200 次的模型看起来同等可信。
+    """
+    gen_ms = int(slot.get("gen_ms", 0))
+    samples = int(slot.get("gen_samples", 0))
+    tokens = int(slot.get("tokens", 0))
+    if gen_ms <= 0 or samples <= 0 or tokens <= 0:
+        return {"tokens_per_sec": None, "throughput_samples": 0}
+    return {"tokens_per_sec": round(tokens / (gen_ms / 1000.0), 2),
+            "throughput_samples": samples}
+
+
 def _with_averages(bucket: dict) -> dict:
     calls = int(bucket.get("calls", 0))
     tokens = int(bucket.get("tokens", 0))
@@ -193,18 +250,61 @@ def snapshot(store, *, days: int = 30, hours: int = 24) -> dict:
         tokens = sum(r["tokens"] for r in rows)
         credit = round(sum(r["credit"] for r in rows), 6)
         duration = sum(r["duration_ms"] for r in rows)
+        first = sum(r["first_token_ms"] for r in rows)
         return {
             "calls": calls, "failed": failed, "success": calls - failed,
             "failure_rate": round(failed / calls, 4) if calls else 0.0,
             "tokens": tokens, "credit": credit,
             "tokens_avg": round(tokens / calls, 1) if calls else 0.0,
             "duration_ms_avg": round(duration / calls, 1) if calls else 0.0,
+            # 首字均值只摊在成功的请求上：失败请求根本没有首字，
+            # 拿 calls 当分母会把均值稀释成「看起来变快了」。
+            "first_token_ms_avg": round(first / max(calls - failed, 1), 1),
         }
 
     return {
         "daily": daily_rows,
         "hourly": hourly_rows,
         "totals": {"daily": total(daily_rows), "hourly": total(hourly_rows)},
+        "throughput": throughput_rows(store, days=days),
         "window": {"days": days, "hours": hours,
                    "daily_keep": DAILY_KEEP, "hourly_keep": HOURLY_KEEP},
     }
+
+
+def throughput_rows(store, *, days: int = 30) -> list[dict]:
+    """窗口内**按模型**的输出速率排行。
+
+    为什么从日桶累加而不是单开一张表：`by_model` 里已经同时有 tokens 和
+    gen_ms，加出来就是答案，多存一份只会多一处对不上的机会。日桶只留 60 天，
+    所以窗口天然被 `DAILY_KEEP` 封顶，不需要额外裁剪。
+
+    返回按 tokens_per_sec 降序；速率算不出来的模型（样本不足）排在最后，
+    但它们仍在列表里 —— 「这个模型有多少次调用是无法测速的」本身是信息。
+    """
+    with store.lock:
+        stats = store.data.get("usage_stats") or default_usage_stats()
+        daily = dict(stats.get("daily") or {})
+
+    days = max(1, min(DAILY_KEEP, int(days or 30)))
+    merged: dict[str, dict] = {}
+    for key in sorted(daily)[-days:]:
+        for name, slot in (daily[key].get("by_model") or {}).items():
+            acc = merged.setdefault(name, {"calls": 0, "failed": 0, "tokens": 0, "gen_ms": 0,
+                                           "gen_samples": 0})
+            acc["calls"] += int(slot.get("calls", 0))
+            acc["failed"] += int(slot.get("failed", 0))
+            acc["tokens"] += int(slot.get("tokens", 0))
+            acc["gen_ms"] += int(slot.get("gen_ms", 0))
+            acc["gen_samples"] += int(slot.get("gen_samples", 0))
+
+    rows = []
+    for name, acc in merged.items():
+        rate = _throughput(acc)
+        rows.append({"model": name, "calls": acc["calls"], "failed": acc["failed"],
+                     "success": acc["calls"] - acc["failed"],
+                     "tokens": acc["tokens"], **rate})
+    # 有速率的按速率降序，没速率的按调用量降序垫后
+    rows.sort(key=lambda r: (r["tokens_per_sec"] is None,
+                             -(r["tokens_per_sec"] or 0), -r["calls"]))
+    return rows

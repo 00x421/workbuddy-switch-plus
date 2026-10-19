@@ -7,7 +7,7 @@
   <div class="login-form-wrap"><form id="login-form"><span class="eyebrow">WORKSPACE ACCESS</span><h2>登录管理控制台</h2><p class="muted">凭据只保存在服务器，浏览器不留存。客户端 API Key 不适用于此处。</p><div class="login-modes" role="tablist" aria-label="登录方式"><button type="button" class="login-mode is-active" role="tab" aria-selected="true" data-login-mode="user">管理员账号</button><button type="button" class="login-mode" role="tab" aria-selected="false" data-login-mode="key">管理密钥</button><button type="button" class="login-mode" role="tab" aria-selected="false" data-login-mode="token">管理令牌</button></div><div class="login-pane" data-login-pane="user"><label for="login-username">用户名</label><input id="login-username" name="username" autocomplete="username" placeholder="admin" required><label for="login-password">密码</label><input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="输入管理员密码" required></div><div class="login-pane" data-login-pane="key" hidden><label for="admin-key">管理密钥</label><input id="admin-key" name="key" type="password" autocomplete="off" placeholder="输入你的管理密钥" disabled><p class="login-note">部署时通过 <code>ADMIN_KEY</code> 配置的单密钥入口，适合 Docker / 命令行直接跑服务的情况。</p></div><div class="login-pane" data-login-pane="token" hidden><label for="login-token">管理令牌</label><input id="login-token" name="token" type="password" autocomplete="off" placeholder="wbt_…" disabled><p class="login-note">在桌面端「反代服务 → 管理令牌」里生成。只读令牌进得来、看得到数据，但改不了东西；改用户和改令牌这两类操作仍然只认会话登录。</p></div><p id="login-error" class="field-error" role="alert"></p><button class="primary wide" type="submit">进入控制台 <span>↗</span></button><div class="privacy-note"><span>◇</span><p>账号凭据保存在服务器。<br>浏览器不会保存你输入的任何凭据。</p></div></form><span class="login-foot">WorkBuddy / CodeBuddy · API Management · <b id="login-version" class="svc-version">v—</b> · <a class="repo-link" href="https://github.com/Hyact/workbuddy-switch-plus" target="_blank" rel="noopener noreferrer">开源地址 ↗</a></span></div>
 </section>
 <div id="workspace" class="app-shell" hidden>
-  <aside class="sidebar"><a class="brand" href="/admin/"><span class="brand-symbol">w<span>↗</span></span><span>WORKBUDDY<small>管理控制台</small></span></a><div class="nav-caption">工作空间</div><nav aria-label="主要导航"><button data-page="dashboard" class="nav-item"><span>▦</span>概览</button><button data-page="accounts" class="nav-item selected"><span>◫</span>账号池</button><button data-page="groups" class="nav-item"><span>❐</span>上游分组</button><button data-page="egress" class="nav-item"><span>⇥</span>出口线路</button><button data-page="logs" class="nav-item"><span>▤</span>请求日志</button><button data-page="keys" class="nav-item"><span>⌘</span>API 密钥</button><button data-page="settings" class="nav-item"><span>⚙</span>服务设置</button><button data-page="test" class="nav-item"><span>↗</span>连接测试</button><button data-page="guide" class="nav-item"><span>≡</span>接入指南</button></nav><div class="sidebar-bottom"><span class="tag">PRIVATE WORKSPACE</span><p><i class="status-dot"></i> 服务已连接 <b id="sidebar-version" class="svc-version">v—</b></p><a class="repo-link" href="https://github.com/Hyact/workbuddy-switch-plus" target="_blank" rel="noopener noreferrer" title="查看开源仓库">★ 开源地址<span>↗</span></a><button id="logout" class="logout">退出登录 <span>↗</span></button></div></aside>
+  <aside class="sidebar"><a class="brand" href="/admin/"><span class="brand-symbol">w<span>↗</span></span><span>WORKBUDDY<small>管理控制台</small></span></a><div class="nav-caption">工作空间</div><nav aria-label="主要导航"><button data-page="dashboard" class="nav-item"><span>▦</span>概览</button><button data-page="accounts" class="nav-item selected"><span>◫</span>账号池</button><button data-page="groups" class="nav-item"><span>❐</span>上游分组</button><button data-page="egress" class="nav-item"><span>⇥</span>出口线路</button><button data-page="logs" class="nav-item"><span>▤</span>请求日志</button><button data-page="keys" class="nav-item"><span>⌘</span>API 密钥</button><button data-page="settings" class="nav-item"><span>⚙</span>服务设置</button><button data-page="test" class="nav-item"><span>↗</span>连接测试</button><button class="nav-item" data-page="models"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/></svg></span>模型目录</button><button class="nav-item" data-page="audit"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h9l5 5v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"/><path d="M14 4v5h5M8 13h8M8 17h5"/></svg></span>审计日志</button><button class="nav-item" data-page="tokens"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="12" r="3.5"/><path d="M11.5 12H20M17 12v3M20 12v2.5"/></svg></span>管理令牌</button><button class="nav-item" data-page="users"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8.5" r="3.2"/><path d="M3.5 19.5c0-3 2.5-5 5.5-5s5.5 2 5.5 5"/><path d="M16 6.2a3 3 0 0 1 0 5.6M17.5 14.8c2 .7 3.2 2.4 3.2 4.7"/></svg></span>管理用户</button><button class="nav-item" data-page="security"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5.5c0 4.3-2.9 7.6-7 9.5-4.1-1.9-7-5.2-7-9.5V6z"/><path d="M9 12l2.2 2.2L15.5 10"/></svg></span>IP 安全</button><button data-page="guide" class="nav-item"><span>≡</span>接入指南</button></nav><div class="sidebar-bottom"><span class="tag">PRIVATE WORKSPACE</span><p><i class="status-dot"></i> 服务已连接 <b id="sidebar-version" class="svc-version">v—</b></p><a class="repo-link" href="https://github.com/Hyact/workbuddy-switch-plus" target="_blank" rel="noopener noreferrer" title="查看开源仓库">★ 开源地址<span>↗</span></a><button id="logout" class="logout">退出登录 <span>↗</span></button></div></aside>
   <div class="main-shell"><header class="topbar"><div><span class="muted">工作空间</span><span class="slash">/</span><span id="breadcrumb">账号管理</span></div><div class="topbar-right"><span id="host-label" class="mono"></span><span class="avatar">W</span></div></header>
   <main>
     <div class="page-title"><div><span id="page-kicker" class="eyebrow">ACCOUNT DIRECTORY</span><h1 id="page-title">账号管理<span class="title-dot">.</span></h1><p id="page-desc" class="muted">集中管理登录凭据、积分与账号可用状态。</p></div><button id="refresh" class="secondary"><span>↻</span> 刷新状态</button></div>
@@ -24,7 +24,8 @@
       <div class="pool-toolbar"><input id="account-search" type="search" placeholder="搜索备注、昵称或 UID" aria-label="搜索账号"><select id="account-filter" aria-label="筛选账号状态"><option value="all">全部状态</option><option value="available">可用</option><option value="cooling">冷却中</option><option value="paused">已暂停</option><option value="exhausted">积分耗尽</option><option value="invalid">凭据异常</option></select><button id="batch-checkin" data-batch class="secondary">▣ 批量签到</button><button id="batch-travel" data-batch class="secondary">✈ 批量派旅行</button><button id="batch-active" data-batch class="secondary">☀ 批量活跃上报</button></div>
       <div class="table-wrap"><table><thead><tr><th>账号</th><th>状态 / 签到</th><th>剩余积分</th><th>凭据有效期</th><th class="align-right">操作</th></tr></thead><tbody id="accounts-body"></tbody></table><div id="accounts-empty" class="empty" hidden><span class="empty-icon">◫</span><h3>从第一个账号开始</h3><p>浏览器授权或导入登录文件，即可加入账号池。</p><button id="empty-add" class="secondary">添加登录凭据</button></div></div>
       <div id="pool-result" class="banner" role="status" hidden></div>
-      <form id="pool-settings" class="pool-settings"><div><h3>自动任务与轮转</h3><p>北京时间每日执行；错过时间会补做，已签到不重复领取。派猫猫旅行按服务端状态机走：派发 → 到点回查 → 领奖，官网「累了，明天再来吧」即当日结束。凭据临近过期时提前刷新。活跃上报每号每天一轮：1 条点亮 growth 连登，5 条补满「领养猫需 5 次对话」的门槛。页面每 30 秒刷新，服务器每 5 分钟查询积分。默认权重 / 并发上限 / 最小间隔是**新加账号**的初值，也可在这里给全池统一改；单个账号的调节在每行「限速」里。并发上限填 0 = 不限制，最小间隔填 0 = 不限速。「全池并发上限」是另一回事：它限制同时打到上游的**总**请求数，不管是哪个账号发起的，超出部分排队等待；账号级上限治不了「每个号都没超、但整体太猛」。0 = 不限制。</p></div><div class="pool-controls"><label>请求分配<select id="pool-routing"><option value="round_robin">账号池轮转</option><option value="manual">手动指定账号</option></select></label><label>签到时间（北京时间）<input id="checkin-time" type="time" required value="09:00"></label><label class="inline-checkbox"><input id="auto-checkin" type="checkbox">每日自动签到</label><label>派旅行时间（北京时间）<input id="travel-time" type="time" required value="08:30"></label><label class="inline-checkbox"><input id="auto-travel" type="checkbox">每日派猫猫旅行</label><label>保活提前量（小时）<input id="keepalive-hours" type="number" min="1" max="168" step="1" required value="6"></label><label class="inline-checkbox"><input id="auto-keepalive" type="checkbox">凭据临近过期自动刷新</label><label>活跃上报时间（北京时间）<input id="active-time" type="time" required value="10:00"></label><label>每日上报条数<input id="active-reports" type="number" min="1" max="5" step="1" required value="1"></label><label class="inline-checkbox"><input id="auto-active" type="checkbox">每日对话活跃上报</label><label>默认账号权重<input id="default-weight" type="number" min="0.1" max="100" step="0.1" value="1"></label><label>默认并发上限<input id="default-max-concurrency" type="number" min="0" max="64" step="1" value="0"></label><label>默认最小间隔（秒）<input id="default-min-interval" type="number" min="0" max="3600" step="0.5" value="0"></label><label>全池并发上限<input id="max-total-concurrency" type="number" min="0" max="256" step="1" value="0"></label><label>上游 workbuddy2api 地址<input id="wb2api-base" type="url" placeholder="http://127.0.0.1:7863" autocomplete="off"></label><label>上游管理密钥<input id="wb2api-key" type="password" placeholder="留空表示上游未设鉴权" autocomplete="off"></label><button class="primary" type="submit">保存设置</button></div></form>
+      <form id="pool-settings" class="pool-settings"><div><h3>自动任务与轮转</h3><p>北京时间每日执行；错过时间会补做，已签到不重复领取。派猫猫旅行按服务端状态机走：派发 → 到点回查 → 领奖，官网「累了，明天再来吧」即当日结束。凭据临近过期时提前刷新。活跃上报每号每天一轮：1 条点亮 growth 连登，5 条补满「领养猫需 5 次对话」的门槛。页面每 30 秒刷新，服务器每 5 分钟查询积分。默认权重 / 并发上限 / 最小间隔是**新加账号**的初值，也可在这里给全池统一改；单个账号的调节在每行「限速」里。并发上限填 0 = 不限制，最小间隔填 0 = 不限速。「全池并发上限」是另一回事：它限制同时打到上游的**总**请求数，不管是哪个账号发起的，超出部分排队等待；账号级上限治不了「每个号都没超、但整体太猛」。0 = 不限制。</p></div><div class="pool-controls"><label>请求分配<select id="pool-routing"><option value="round_robin">账号池轮转</option><option value="manual">手动指定账号</option></select></label><label>签到时间（北京时间）<input id="checkin-time" type="time" required value="09:00"></label><label class="inline-checkbox"><input id="auto-checkin" type="checkbox">每日自动签到</label><label>派旅行时间（北京时间）<input id="travel-time" type="time" required value="08:30"></label><label class="inline-checkbox"><input id="auto-travel" type="checkbox">每日派猫猫旅行</label><label>保活提前量（小时）<input id="keepalive-hours" type="number" min="1" max="168" step="1" required value="6"></label><label class="inline-checkbox"><input id="auto-keepalive" type="checkbox">凭据临近过期自动刷新</label><label>活跃上报时间（北京时间）<input id="active-time" type="time" required value="10:00"></label><label>每日上报条数<input id="active-reports" type="number" min="1" max="5" step="1" required value="1"></label><label class="inline-checkbox"><input id="auto-active" type="checkbox">每日对话活跃上报</label><label>默认账号权重<input id="default-weight" type="number" min="0.1" max="100" step="0.1" value="1"></label><label>默认并发上限<input id="default-max-concurrency" type="number" min="0" max="64" step="1" value="0"></label><label>默认最小间隔（秒）<input id="default-min-interval" type="number" min="0" max="3600" step="0.5" value="0"></label><label>全池并发上限<input id="max-total-concurrency" type="number" min="0" max="256" step="1" value="0"></label><label class="inline-checkbox"><input id="retry-enabled" type="checkbox">镜像加速（上游 5xx / 连接失败时先重试再判死）</label><label>重试次数（含首次）<input id="retry-attempts" type="number" min="0" max="5" step="1" value="0"></label><label>退避基数（秒）<input id="retry-backoff" type="number" min="0" max="8" step="0.1" value="0"></label><label>上游 workbuddy2api 地址<input id="wb2api-base" type="url" placeholder="http://127.0.0.1:7863" autocomplete="off"></label><label>上游管理密钥<input id="wb2api-key" type="password" placeholder="留空表示上游未设鉴权" autocomplete="off"></label><button class="primary" type="submit">保存设置</button></div></form>
+      <div id="task-summary" class="task-summary"></div>
       <div class="section-toolbar"><div><h2>自动任务流水 <span id="task-log-badge" class="count-badge">0</span></h2><p>签到 / 派猫猫旅行 / 凭据保活的执行记录，最多保留最近 500 条。跨日不再重试「今日已派」与「无 Buddy」以外的失败。</p></div></div>
       <div class="pool-toolbar"><select id="task-log-kind" aria-label="按任务类别筛选"><option value="">全部类别</option><option value="checkin">签到</option><option value="travel">派猫猫旅行</option><option value="keepalive">凭据保活</option><option value="active">活跃上报</option></select><button id="task-log-refresh" class="secondary">刷新</button><button id="task-log-clear" class="secondary">清空</button></div>
       <div class="table-wrap"><table><thead><tr><th>时间</th><th>账号</th><th>类别</th><th>结果</th><th>说明</th></tr></thead><tbody id="task-logs-body"></tbody></table></div>
@@ -52,12 +53,11 @@
       <div id="log-account-list" class="log-accounts"></div>
       <div class="section-toolbar"><div><h2>请求明细 <span id="log-badge" class="count-badge">0</span></h2><p>切到本页时立即读取，之后每 5 秒自动刷新（页面不可见时暂停）。<span id="logs-updated" class="muted"></span></p></div><div class="seg" role="group" aria-label="明细呈现方式"><button id="log-view-flat" class="secondary" aria-pressed="true">明细表</button><button id="log-view-grouped" class="secondary" aria-pressed="false">按分组</button></div></div>
       <div class="pool-toolbar"><select id="log-account" data-all="全部账号" aria-label="按账号筛选"><option value="all">全部账号</option></select><select id="log-key" data-all="全部密钥" aria-label="按密钥筛选"><option value="all">全部密钥</option></select><select id="log-model" data-all="全部模型" aria-label="按模型筛选"><option value="all">全部模型</option></select><select id="log-outcome" data-all="全部结果" aria-label="按结果筛选"><option value="all">全部结果</option><option value="success">成功</option><option value="upstream_error">上游报错</option><option value="no_account">无可用账号</option><option value="rejected">被规则拒绝</option></select><select id="log-group" data-all="全部分组" aria-label="按分组筛选"><option value="all">全部分组</option></select><button id="log-clear-filter" class="secondary">清除筛选</button></div>
-      <div id="log-flat-view" class="table-wrap"><table><thead><tr><th>时间</th><th>账号</th><th>密钥</th><th>分组</th><th>模型</th><th>结果</th><th class="align-right">Token</th><th class="align-right">积分</th><th class="align-right">耗时</th></tr></thead><tbody id="logs-body"></tbody></table></div>
+      <div id="log-flat-view" class="table-wrap"><table><thead><tr><th>时间</th><th>账号</th><th>密钥</th><th>分组</th><th>模型</th><th class="align-right">tok/s</th><th>结果</th><th class="align-right">Token</th><th class="align-right">积分</th><th class="align-right">耗时</th></tr></thead><tbody id="logs-body"></tbody></table></div>
       <div id="log-grouped-view" class="log-groups" hidden></div>
     </section>
     <section id="page-keys" class="page-panel" hidden><div class="banner">API Key 用于客户端调用。密钥明文保存在本机 state.json 中，可随时点右侧的眼睛图标在掩码与明文之间切换；点「撤销」后立即停止接受新请求。</div><div class="section-toolbar"><div><h2>管理员密钥</h2><p>由你在这里创建，用于本机或自有客户端调用，可绑分组、设配额。</p></div><button id="add-key" class="primary">＋ 创建密钥</button></div><div class="table-wrap"><table><thead><tr><th>名称</th><th>密钥</th><th>状态</th><th>创建时间</th><th>上游分组</th><th>额度与限制</th><th class="align-right">操作</th></tr></thead><tbody id="keys-body"></tbody></table></div>
       <div class="table-wrap"><table><thead><tr><th>名称</th><th>密钥</th><th>创建时间</th><th>上游分组</th><th class="align-right">操作</th></tr></thead><tbody id="member-keys-body"></tbody></table></div></section>
-
 
     <section id="page-settings" class="page-panel" hidden>
       <div id="set-error" class="banner warning" role="alert" hidden></div>
@@ -153,7 +153,174 @@
       
     </section>
     <section id="page-test" class="page-panel" hidden><div class="test-layout"><form id="test-form" class="surface test-form"><span class="eyebrow">LIVE REQUEST</span><h2>发送一条真实请求</h2><p class="muted">使用当前选中的账号，测试会消耗少量上游额度。</p><div class="active-strip">当前账号 <strong id="test-account">—</strong></div><label for="model">测试模型</label><select id="model" required></select><label for="test-prompt">消息</label><textarea id="test-prompt" rows="5" maxlength="2000" required>请只回复：连接成功</textarea><button id="test-submit" class="primary wide" type="submit">发送测试 ↗</button></form><article class="surface response-surface"><div class="response-header"><h2>响应结果</h2><span id="test-status" class="pill">等待请求</span></div><pre id="test-output" class="test-output">选择模型并发送消息，结果将在这里显示。</pre><div id="test-meta" class="muted mono"></div></article></div><div class="section-toolbar"><div><h2>本次运行的测试记录</h2><p>仅记录状态与耗时，不记录测试消息或回复。</p></div></div><div id="test-history" class="history"></div></section>
-    <section id="page-guide" class="page-panel" hidden><div class="guide-grid"><article class="surface"><span class="eyebrow">01 / CREDENTIALS</span><h2>添加登录凭据</h2><p>优先使用“添加账号 → 浏览器登录”，在官方页面授权后自动保存，无需桌面客户端。也可在桌面端登录后，按 Win + R 打开以下目录导入文件：</p><div class="code-block"><code>%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth</code><button data-copy="%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth" class="copy-button">复制</button></div><p>将其中的 <code>.info</code> 文件拖入“添加账号”，或粘贴其 JSON 内容。支持保留多个账号并手动切换；浏览器授权和文件导入可同时使用。</p></article><article class="surface"><span class="eyebrow">02 / CLIENTS</span><h2>连接你的客户端</h2><label>OpenAI / Responses Base URL</label><div class="code-block"><code id="base-url"></code><button id="copy-base" class="copy-button">复制</button></div><label>Anthropic Base URL</label><div class="code-block"><code id="anthropic-url"></code><button id="copy-anthropic" class="copy-button">复制</button></div><p>在“API 密钥”创建 Key 后填入客户端。模型可先使用 <code>deepseek-v4.1-flash</code>；列表中的其他模型是否可用取决于账号权限。</p></article></div><article class="surface endpoints"><h2>支持的接口</h2><div><span>POST</span><code>/v1/chat/completions</code><p>OpenAI Chat Completions</p></div><div><span>POST</span><code>/v1/responses</code><p>Responses 客户端</p></div><div><span>POST</span><code>/v1/messages</code><p>Anthropic Messages</p></div><div><span>GET</span><code>/v1/models</code><p>内置模型列表</p></div></article></section>
+    <section id="page-models" class="page-panel" hidden>
+  <div class="page-inner">
+    <div class="surface">
+      <div class="surface-head"><div><span class="eyebrow">MODEL CATALOG</span><h2>模型目录</h2></div>
+        <div class="row-actions">
+          <label class="checkbox"><input id="models-free-only" type="checkbox"> 只看限时免费</label>
+          <input id="models-search" type="search" placeholder="搜模型名 / 厂商 / 别名" spellcheck="false">
+          <button class="button ghost" id="models-refresh" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3.2-6.9"/><path d="M21 4v4h-4"/></svg>刷新</button>
+        </div>
+      </div>
+      <div class="usage-cards" id="usage-cards"></div>
+      <p class="muted">输出速率 = 生成 token 数 ÷（总耗时 − 首字耗时），只统计成功的请求；非流式没有首字，用整段耗时顶替，数字偏低但不凭空造。
+        括号里是样本量 —— 2 次和 200 次能算出同一个数字，不看样本量就会被它骗。</p>
+      <div class="table-wrap"><table class="table" id="usage-speed-table">
+        <thead><tr><th>模型</th><th class="align-right">输出速率</th><th class="align-right">样本</th><th class="align-right">调用</th><th class="align-right">失败</th><th class="align-right">Token</th></tr></thead>
+        <tbody id="usage-speed-body"><tr><td colspan="6" class="history-empty">读取中…</td></tr></tbody>
+      </table></div>
+      <p class="muted">「限时免费」只认上游的 tags 字段，标签缺失一律当收费 —— 宁可漏判也不误判：把收费模型标成免费，用户会拿它跑大活，账单出来才发现。</p>
+      <div class="table-wrap"><table class="table" id="models-table">
+        <thead><tr><th>模型</th><th>厂商</th><th>上下文</th><th>最大输出</th><th>能力</th><th>积分</th><th>别名</th><th>密钥数</th></tr></thead>
+        <tbody id="models-body"><tr><td colspan="8" class="history-empty">读取中…</td></tr></tbody>
+      </table></div>
+    </div>
+    <div class="surface">
+      <div class="surface-head"><div><span class="eyebrow">ALIASES</span><h2>模型别名</h2></div>
+        <div class="row-actions">
+          <input id="alias-from" type="text" placeholder="别名，例如 gpt-4o" spellcheck="false">
+          <input id="alias-to" type="text" placeholder="真实模型，例如 hy4-preview-f" spellcheck="false">
+          <button class="button" id="alias-add" type="button">添加</button>
+          <button class="button ghost" id="alias-save" type="button">保存全部</button>
+        </div>
+      </div>
+      <p class="muted">客户端可以拿左边这个名字发起请求，服务会改写成右边的真实模型再转给上游。
+        保存是<b>整表替换</b>：界面上看到的就是最终结果，删掉一行再保存即等于删除该别名。</p>
+      <div class="table-wrap"><table class="table" id="alias-table">
+        <thead><tr><th>别名</th><th>指向的真实模型</th><th>状态</th><th class="align-right">操作</th></tr></thead>
+        <tbody id="alias-body"><tr><td colspan="4" class="history-empty">读取中…</td></tr></tbody>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section id="page-audit" class="page-panel" hidden>
+  <div class="page-inner">
+    <div class="surface">
+      <div class="surface-head"><div><span class="eyebrow">AUDIT TRAIL</span><h2>审计日志</h2></div>
+        <div class="row-actions">
+          <button class="button ghost" id="audit-refresh" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3.2-6.9"/><path d="M21 4v4h-4"/></svg>刷新</button>
+          <button class="button ghost danger" id="audit-clear" type="button">清空</button>
+        </div>
+      </div>
+      <p class="muted">任何改动类操作都会在这里留一行，<b>包括清空动作本身</b>。登录、改密钥、改策略、改账号都在内；只读身份看不到这一页。</p>
+      <div class="table-wrap"><table class="table" id="audit-table">
+        <thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>对象</th><th>详情</th></tr></thead>
+        <tbody id="audit-body"><tr><td colspan="5" class="history-empty">读取中…</td></tr></tbody>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section id="page-tokens" class="page-panel" hidden>
+  <div class="page-inner">
+    <div class="surface">
+      <div class="surface-head"><div><span class="eyebrow">SCOPED TOKENS</span><h2>管理令牌</h2></div>
+        <div class="row-actions">
+          <button class="button ghost" id="tokens-refresh" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3.2-6.9"/><path d="M21 4v4h-4"/></svg>刷新</button>
+          <button class="button" id="tokens-add" type="button">创建令牌</button>
+        </div>
+      </div>
+      <p class="muted">用于脚本 / CLI 访问本管理后台，按作用域授权。<b>令牌只存哈希，明文仅在创建时显示一次</b>；只读令牌不能修改任何数据。
+        它们也能直接登内置管理后台（服务地址 + <code>/admin/</code>），不必再记管理密钥。高危接口（用户、令牌、安全策略）只接受账号密码会话登录。</p>
+      <div class="table-wrap"><table class="table" id="tokens-table">
+        <thead><tr><th>名称 / 标识</th><th>作用域</th><th>状态</th><th>创建 / 最近使用</th><th class="align-right">操作</th></tr></thead>
+        <tbody id="tokens-body"><tr><td colspan="5" class="history-empty">读取中…</td></tr></tbody>
+      </table></div>
+      <form id="token-form" class="inline-form" hidden>
+        <label>名称<input id="token-name" maxlength="64" placeholder="例如：监控脚本" required></label>
+        <label>作用域<select id="token-scope"><option value="readonly">只读</option><option value="admin">管理员</option></select></label>
+        <label>有效期（天）<input id="token-days" type="number" min="0" value="0"></label>
+        <div class="row-actions">
+          <button class="button" id="token-submit" type="submit">创建</button>
+          <button class="button ghost" id="token-cancel" type="button">取消</button>
+        </div>
+        <p class="form-error" id="token-error" hidden></p>
+        <p class="muted">0 = 永不过期。管理员令牌可执行账号与密钥管理，但仍不能管理令牌本身。</p>
+      </form>
+      <div id="token-issued" class="banner" hidden>
+        <b>保存你的新令牌</b> —— 关闭后无法再次查看完整内容。
+        <div class="code-block"><code id="token-value"></code><button id="token-copy" class="copy-button" type="button">复制</button></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="page-users" class="page-panel" hidden>
+  <div class="page-inner">
+    <div class="surface">
+      <div class="surface-head"><div><span class="eyebrow">CONSOLE ACCOUNTS</span><h2>管理用户</h2></div>
+        <div class="row-actions">
+          <button class="button ghost" id="users-refresh" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3.2-6.9"/><path d="M21 4v4h-4"/></svg>刷新</button>
+          <button class="button" id="users-add" type="button">新建用户</button>
+        </div>
+      </div>
+      <p class="muted">这是<b>控制台登录账号</b>，不是账号池里的 CodeBuddy 账号。口令以 PBKDF2-SHA256 加盐哈希保存；
+        改密码 / 改角色会立刻吊销该用户已登录的会话。至少保留一个管理员，也不能删除当前登录的用户。</p>
+      <div class="session-strip" id="users-self"></div>
+      <div class="table-wrap"><table class="table" id="users-table">
+        <thead><tr><th>用户名</th><th>角色</th><th class="align-right">操作</th></tr></thead>
+        <tbody id="users-body"><tr><td colspan="3" class="history-empty">读取中…</td></tr></tbody>
+      </table></div>
+      <form id="user-form" class="inline-form" hidden>
+        <label>用户名<input id="user-username" maxlength="64" required></label>
+        <label>密码<input id="user-password" type="password" minlength="8" required></label>
+        <label>角色<select id="user-role"><option value="viewer">只读</option><option value="admin">管理员</option></select></label>
+        <div class="row-actions">
+          <button class="button" id="user-submit" type="submit">创建</button>
+          <button class="button ghost" id="user-cancel" type="button">取消</button>
+        </div>
+        <p class="form-error" id="user-error" hidden></p>
+        <p class="muted">密码至少 8 位。只读用户能看所有数据，但不能改任何东西。</p>
+      </form>
+    </div>
+  </div>
+</section>
+
+<section id="page-security" class="page-panel" hidden>
+  <div class="page-inner">
+    <div class="surface">
+      <div class="surface-head"><div><span class="eyebrow">INBOUND IP CONTROL</span><h2>IP 安全</h2></div>
+        <div class="row-actions">
+          <button class="button ghost" id="security-refresh" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3.2-6.9"/><path d="M21 4v4h-4"/></svg>刷新</button>
+        </div>
+      </div>
+      <p class="muted">对入站的 <code>/v1</code> 与 <code>/admin</code> 请求统一做 IP 白 / 黑名单管控；关闭时零开销。</p>
+      <div class="security-switch">
+        <label class="checkbox"><input id="security-enabled" type="checkbox"> 启用 IP 管控</label>
+        <label>模式<select id="security-mode">
+          <option value="blacklist">黑名单（默认放行）</option>
+          <option value="whitelist">白名单（默认拒绝）</option>
+        </select></label>
+        <p class="muted">黑名单：命中拒绝规则即拦。白名单：只有命中放行规则才放行 —— <b>启用白名单前务必先加一条放行“127.0.0.1”，否则本机也会被挡在外面。</b></p>
+      </div>
+      <div id="security-warn" class="banner danger" hidden>当前是白名单模式且没有任何放行规则：所有请求（含本机）都会被拒绝。</div>
+
+      <h3 class="sub-title">规则 <span id="security-rule-count" class="pill">0</span></h3>
+      <form id="rule-form" class="inline-form">
+        <label>类型<select id="rule-kind"><option value="allow">放行</option><option value="deny">拒绝</option></select></label>
+        <label>IP / CIDR<input id="rule-cidr" placeholder="10.0.0.0/8" class="mono" required></label>
+        <label>备注<input id="rule-note" maxlength="120"></label>
+        <button class="button" id="rule-submit" type="submit">添加</button>
+      </form>
+      <p class="form-error" id="rule-error" hidden></p>
+      <div class="table-wrap"><table class="table" id="rules-table">
+        <thead><tr><th>类型</th><th>IP / CIDR</th><th>备注</th><th>创建时间</th><th class="align-right">操作</th></tr></thead>
+        <tbody id="rules-body"><tr><td colspan="5" class="history-empty">读取中…</td></tr></tbody>
+      </table></div>
+
+      <h3 class="sub-title">访问日志 <span id="security-log-count" class="pill">0</span>
+        <button class="button ghost danger" id="security-log-clear" type="button">清空</button></h3>
+      <div class="table-wrap"><table class="table" id="ip-logs-table">
+        <thead><tr><th>时间</th><th>来源 IP</th><th>接口</th><th>结果</th></tr></thead>
+        <tbody id="ip-logs-body"><tr><td colspan="4" class="history-empty">读取中…</td></tr></tbody>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section id="page-guide" class="page-panel" hidden><div class="guide-grid"><article class="surface"><span class="eyebrow">01 / CREDENTIALS</span><h2>添加登录凭据</h2><p>优先使用“添加账号 → 浏览器登录”，在官方页面授权后自动保存，无需桌面客户端。也可在桌面端登录后，按 Win + R 打开以下目录导入文件：</p><div class="code-block"><code>%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth</code><button data-copy="%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth" class="copy-button">复制</button></div><p>将其中的 <code>.info</code> 文件拖入“添加账号”，或粘贴其 JSON 内容。支持保留多个账号并手动切换；浏览器授权和文件导入可同时使用。</p></article><article class="surface"><span class="eyebrow">02 / CLIENTS</span><h2>连接你的客户端</h2><label>OpenAI / Responses Base URL</label><div class="code-block"><code id="base-url"></code><button id="copy-base" class="copy-button">复制</button></div><label>Anthropic Base URL</label><div class="code-block"><code id="anthropic-url"></code><button id="copy-anthropic" class="copy-button">复制</button></div><p>在“API 密钥”创建 Key 后填入客户端。模型可先使用 <code>deepseek-v4.1-flash</code>；列表中的其他模型是否可用取决于账号权限。</p></article></div><article class="surface endpoints"><h2>支持的接口</h2><div><span>POST</span><code>/v1/chat/completions</code><p>OpenAI Chat Completions</p></div><div><span>POST</span><code>/v1/responses</code><p>Responses 客户端</p></div><div><span>POST</span><code>/v1/messages</code><p>Anthropic Messages</p></div><div><span>GET</span><code>/v1/models</code><p>内置模型列表</p></div></article></section>
     <footer class="main-footer"><span>WORKBUDDY CONSOLE</span><span>凭据管理 · 安全连接 · 即时验证</span><a class="repo-link" href="https://github.com/Hyact/workbuddy-switch-plus" target="_blank" rel="noopener noreferrer" title="查看开源仓库">开源地址 ↗</a></footer>
   </main></div>
 </div>
@@ -193,6 +360,7 @@
       <textarea id="key-ip-allowlist" rows="3" spellcheck="false" placeholder="127.0.0.1&#10;10.0.0.0/8"></textarea>
 
       <label for="key-models">模型白名单 <span class="muted">（每行一个，留空不限制）</span></label>
+      <div id="key-free-models" class="free-chips"></div>
       <textarea id="key-models" rows="3" spellcheck="false" placeholder="留空表示可以使用任何模型"></textarea>
       <p class="muted" id="key-models-hint"></p>
 

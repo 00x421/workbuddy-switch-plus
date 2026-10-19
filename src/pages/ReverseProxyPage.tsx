@@ -15,8 +15,10 @@ import {
 import { saveLogin, savedLogin, serviceSupported, type RpSavedLogin } from "@/lib/reverse-proxy-service";
 import { performSignOut, shouldAutoLogin } from "@/lib/sign-out";
 import { AddAccountDialog } from "@/components/reverse-proxy/add-account-dialog";
+import { BatchScanDialog } from "@/components/reverse-proxy/batch-scan-dialog";
 import { AccountsPanel } from "@/components/reverse-proxy/accounts-panel";
 import { AlertsPanel } from "@/components/reverse-proxy/alerts-panel";
+import { AuditPanel } from "@/components/reverse-proxy/audit-panel";
 import { EgressPanel } from "@/components/reverse-proxy/egress-panel";
 import { GroupsPanel } from "@/components/reverse-proxy/groups-panel";
 import { GuidePanel, TestPanel } from "@/components/reverse-proxy/test-guide-panel";
@@ -85,6 +87,9 @@ const NAV: { group: string; items: { value: string; label: string; icon: typeof 
       // 控制台登录账号（用来登录 8787 后台），不是上面那套终端用户。
       { value: "users", label: "后台账号", icon: ShieldCheck },
       { value: "security", label: "IP 安全", icon: Activity },
+      // 审计日志后端一直有（`/admin/api/audit-logs`），但桌面端与网页端都没调过。
+      // 出事之后第一个要问的就是「这条是什么时候被谁改的」，没有入口等于没有这个能力。
+      { value: "audit", label: "审计日志", icon: ScrollText },
       { value: "test", label: "连接测试", icon: PlugZap },
     ],
   },
@@ -108,6 +113,7 @@ export default function ReverseProxyPage() {
   const [users, setUsers] = useState<RpUser[]>([]);
   const [tab, setTab] = useState("overview");
   const [addOpen, setAddOpen] = useState(false);
+  const [batchOpen, setBatchOpen] = useState(false);
   const visibleRef = useRef(true);
 
   const loadOverview = useCallback(async () => {
@@ -288,7 +294,7 @@ export default function ReverseProxyPage() {
             <RequestLogPanel keys={overview.keys} groups={overview.groups} />
           </TabsContent>
           <TabsContent value="accounts" className="mt-0">
-            <AccountsPanel overview={overview} reload={loadOverview} onAddAccount={() => setAddOpen(true)} />
+            <AccountsPanel overview={overview} reload={loadOverview} onAddAccount={() => setAddOpen(true)} onBatchScan={() => setBatchOpen(true)} />
           </TabsContent>
           <TabsContent value="groups" className="mt-0">
             <GroupsPanel />
@@ -317,6 +323,9 @@ export default function ReverseProxyPage() {
           <TabsContent value="security" className="mt-0">
             <SecurityPanel />
           </TabsContent>
+          <TabsContent value="audit" className="mt-0">
+            <AuditPanel />
+          </TabsContent>
           <TabsContent value="test" className="mt-0">
             <TestPanel overview={overview} active={active} />
           </TabsContent>
@@ -327,6 +336,7 @@ export default function ReverseProxyPage() {
       </Tabs>
 
       <AddAccountDialog open={addOpen} onOpenChange={setAddOpen} onAdded={() => void loadOverview().catch(() => undefined)} />
+        <BatchScanDialog open={batchOpen} onOpenChange={setBatchOpen} onAdded={() => void loadOverview().catch(() => undefined)} />
     </div>
   );
 }

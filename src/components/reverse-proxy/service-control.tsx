@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { AlertTriangle, ChevronDown, ChevronRight, FolderOpen, FolderSearch, Globe, Play, RefreshCw, ShieldAlert, Square, Terminal } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight, FolderOpen, FolderSearch, Globe, Hash, Play, RefreshCw, ShieldAlert, Square, Terminal } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Banner, CodeBlock, CopyButton, ToneBadge } from "@/components/reverse-proxy/rp-shared";
 import { getBaseUrl } from "@/lib/reverse-proxy";
 import {
-  adoptBaseUrl, serviceOpenDataDir, serviceRestartWithHost, serviceSetExe, serviceStart,
+  adoptBaseUrl, serviceOpenDataDir, serviceRestartWithHost, serviceRestartWithPort, serviceSetExe, serviceStart,
   serviceStatus, serviceStop, serviceStopElevated, serviceSupported,
   type RpServiceStatus,
 } from "@/lib/reverse-proxy-service";
@@ -20,9 +20,11 @@ import {
 export function ServiceControl({ onServiceUp }: { onServiceUp?: () => void }) {
   const supported = serviceSupported();
   const [status, setStatus] = useState<RpServiceStatus | null>(null);
-  const [busy, setBusy] = useState<"" | "start" | "stop" | "elevate" | "exe" | "open" | "refresh" | "lan">("");
+  const [busy, setBusy] = useState<"" | "start" | "stop" | "elevate" | "exe" | "open" | "refresh" | "lan" | "port">("");
   const [error, setError] = useState("");
   const [showLog, setShowLog] = useState(false);
+  /** 换端口输入框。与 status.port 分开存：输入过程中允许是半截数字。 */
+  const [portDraft, setPortDraft] = useState("");
   // 普通停止失败过之后，把「以管理员身份停止」顶到显眼位置——大多数停不掉都是权限问题。
   const [stopFailed, setStopFailed] = useState(false);
   const upRef = useRef(false);
@@ -155,6 +157,52 @@ export function ServiceControl({ onServiceUp }: { onServiceUp?: () => void }) {
       const message = cause instanceof Error ? cause.message : String(cause);
       setError(message);
       toast.error("重启失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  /**
+   * 换端口重启。
+   *
+   * 三条前置校验都在发请求之前做，理由相同：换个端口失败的结果是**旧服务已经停了、
+   * 新服务起不来**，用户从「能用」掉到「完全不能用」。能提前拦的一律提前拦。
+   *
+   * 端口下限 1024：低于它的端口在 Windows 上通常需要管理员权限，
+   * 而且 1–1023 里有一堆系统服务，撞上一个就是起不来。
+   */
+  async function restartOnPort() {
+    const next = Number(portDraft.trim());
+    if (!Number.isFinite(next) || !Number.isInteger(next)) {
+      setError("端口必须是整数");
+      return;
+    }
+    if (next < 1024 || next > 65535) {
+      setError("端口需在 1024–65535 之间");
+      return;
+    }
+    if (running && next === status?.port) {
+      setError("新端口和当前端口一样，没有需要重启的");
+      return;
+    }
+    if (!window.confirm(
+      `将把反代服务重启到端口 ${next}。\n\n` +
+      "· 服务会中断几秒，正在转发的请求会失败重试。\n" +
+      "· 客户端里配置的地址要跟着改成新端口，否则会连不上。\n\n" +
+      "继续吗？",
+    )) return;
+    setBusy("port");
+    setError("");
+    try {
+      const result = await serviceRestartWithPort(next);
+      adoptBaseUrl(result);
+      apply(result);
+      setPortDraft("");
+      toast.success(`已重启到端口 ${next}`);
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError(message);
+      toast.error("换端口失败");
     } finally {
       setBusy("");
     }
@@ -312,6 +360,38 @@ export function ServiceControl({ onServiceUp }: { onServiceUp?: () => void }) {
           <CodeBlock action={<CopyButton value={running && status ? status.baseUrl : getBaseUrl()} />}>
             {running && status ? status.baseUrl : getBaseUrl()}
           </CodeBlock>
+        </div>
+
+        {/* 换端口。输入框常驻而不是塞进弹窗：用户改完端口通常要马上把新地址
+            复制给客户端配置，两个动作挨在一起才不会来回找。 */}
+        <div className="grid min-w-0 gap-2">
+          <span className="text-[11px] font-medium text-muted-foreground">启动端口</span>
+          <div className="min-w-0 rounded-lg border border-border/70 bg-muted/50 px-3 py-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <code className="font-mono text-[11px]">当前 {status?.port ?? "—"}</code>
+              <input
+                className="h-7 w-24 rounded-md border border-input bg-background px-2 font-mono text-[11px] outline-none focus-visible:border-ring"
+                inputMode="numeric"
+                placeholder="新端口"
+                value={portDraft}
+                disabled={busy !== ""}
+                onChange={(e) => setPortDraft(e.target.value.replace(/[^\d]/g, "").slice(0, 5))}
+                onKeyDown={(e) => { if (e.key === "Enter") void restartOnPort(); }}
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={busy !== "" || !portDraft.trim()}
+                onClick={() => void restartOnPort()}
+              >
+                <Hash className="size-3.5" />{busy === "port" ? "重启中…" : "换端口重启"}
+              </Button>
+            </div>
+            <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
+              端口是启动参数，改不了只能重启，所以这里是「先停后启」；服务会中断几秒。
+              新端口被占用时不会动手，当前服务保持原样。范围 1024–65535。
+            </p>
+          </div>
         </div>
 
         {/* 服务程序路径很长，且旁边还有两个按钮：挤在一行里必然叠字/被卡片裁掉。

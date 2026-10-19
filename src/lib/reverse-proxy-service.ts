@@ -55,6 +55,20 @@ export function serviceRestartWithHost(host: "0.0.0.0" | "127.0.0.1"): Promise<R
   return invoke<RpServiceStatus>("reverse_proxy_restart_with_host", { host });
 }
 
+/**
+ * 换端口重启服务。
+ *
+ * 端口和监听地址一样是 uvicorn 的启动参数，改不了只能重启。与换地址的差别是
+ * **新端口必须先确认没被占** —— 先停再启时如果新端口起不来，用户会从「能用」
+ * 掉到「完全不能用」，而这个失败本来可以在动手之前就拒绝掉。
+ *
+ * 监听姿态由 Rust 侧沿用当前值（当前绑 0.0.0.0 就还是 0.0.0.0），
+ * 换端口不该顺手把服务暴露到局域网。
+ */
+export function serviceRestartWithPort(port: number): Promise<RpServiceStatus> {
+  return invoke<RpServiceStatus>("reverse_proxy_restart_with_port", { port });
+}
+
 export function serviceStop(): Promise<RpServiceStatus> {
   return invoke<RpServiceStatus>("reverse_proxy_stop");
 }

@@ -502,7 +502,12 @@ def _credit_rate(raw) -> float | None:
 
 
 def _catalog_entry(entry: dict) -> dict:
-    """把产品配置里的一条模型条目整理成模型中心要的形状（字段名统一成 snake_case）。"""
+    """把产品配置里的一条模型条目整理成模型中心要的形状（字段名统一成 snake_case）。
+
+    `tags` 是「限时免费筛选」的唯一依据：上游把「限时免费」写进 tags（中文标记），
+    **没有 tags 的模型一律不算免费**。不能拿 `credits` 文案去猜——那是计费说明文本，
+    形态随上游改版而变；tags 是分类标记，只有它才是稳定判据。
+    """
     context = entry.get("contextWindow")
     context = context if isinstance(context, dict) else {}
     supported = context.get("supportedLengths")
@@ -526,8 +531,19 @@ def _catalog_entry(entry: dict) -> dict:
         "only_reasoning": bool(entry.get("onlyReasoning")),
         "reasoning_effort": reasoning.get("effort") if isinstance(reasoning, dict) else None,
         "temperature": entry.get("temperature"),
-        "tags": list(entry.get("tags") or []),
+        "tags": [str(t) for t in (entry.get("tags") or []) if t],
     }
+
+
+def is_free_model(entry: dict) -> bool:
+    """这模型是不是「限时免费」。判据只有 tags，**没有 tags 就是收费**。
+
+    宁可漏判也不误判：把收费模型标成免费，用户会拿它跑大活，账单出来才发现。
+    """
+    for tag in (entry.get("tags") or []):
+        if "免费" in str(tag) or "限时免费" in str(tag) or "free" in str(tag).lower():
+            return True
+    return False
 
 
 def get_model_catalog() -> list[dict]:
@@ -549,6 +565,16 @@ def get_model_catalog() -> list[dict]:
         "supports_reasoning": False, "only_reasoning": False,
         "reasoning_effort": None, "temperature": None, "tags": ["fallback"],
     } for mid in DEFAULT_MODELS]
+
+
+def get_model_catalog_with_free() -> list[dict]:
+    """在 `get_model_catalog()` 的每条上补一个 `free` 布尔值。
+
+    为什么不直接在 `_catalog_entry` 里加：那个函数是"上游字段的直译层"，
+    加派生字段会让它同时承担两种职责，上游一改字段这里就要跟着改两次。
+    `free` 是**判据**，单独一层，改判据只动这一处。
+    """
+    return [{**entry, "free": is_free_model(entry)} for entry in get_model_catalog()]
 
 
 def get_available_models() -> list[str]:

@@ -336,12 +336,34 @@ function LogTableHeadRow() {
       <th className="px-3 py-2 text-left font-medium">账号</th>
       <th className="px-3 py-2 text-left font-medium">分组</th>
       <th className="px-3 py-2 text-left font-medium">模型</th>
+      <th className="px-3 py-2 text-right font-medium">tok/s</th>
       <th className="px-3 py-2 text-left font-medium">结果</th>
       <th className="px-3 py-2 text-right font-medium">Token</th>
       <th className="px-3 py-2 text-right font-medium">积分</th>
       <th className="px-3 py-2 text-right font-medium">耗时</th>
     </tr>
   );
+}
+
+/**
+ * 单条请求的输出速率。分母只算「真正在生成」的那段（总耗时 − 首字耗时）。
+ *
+ * 与后端 `admin/usage.py` 的 `generation_ms()` **必须同口径**，否则聚合页与
+ * 明细页会对不上：
+ *   · 失败请求不算 —— 重试把排队和鉴权时间摊进了耗时，混进去速率会被压成噪声
+ *   · 0 token 不算 —— 没有分母
+ *   · 首字时间必须早于总耗时 —— 否则相减是负数
+ * 非流式没有首字时间，就拿整段耗时顶替：算出来偏低，但不会凭空捏造。
+ */
+export function logTps(row: { ok?: boolean; tokens?: number; duration_ms?: number; first_token_ms?: number }): string {
+  if (!row || !row.ok) return "—";
+  const tokens = Number(row.tokens) || 0;
+  const total = Number(row.duration_ms) || 0;
+  const first = Number(row.first_token_ms) || 0;
+  if (tokens <= 0 || total <= 0) return "—";
+  const gen = first > 0 ? (first >= total ? 0 : total - first) : total;
+  if (gen <= 0) return "—";
+  return (tokens / (gen / 1000)).toFixed(1);
 }
 
 /**
@@ -383,6 +405,7 @@ function LogRow({ row, keys, groups }: {
         )}
       </td>
       <td className="px-3 py-1.5 font-mono text-[11px]">{row.model || "—"}</td>
+      <td className="px-3 py-1.5 text-right tabular-nums">{logTps(row)}</td>
       <td className="px-3 py-1.5">
         <ToneBadge tone={state.tone}>{state.label}</ToneBadge>
         <span className="ml-1.5 font-mono text-[10px] text-muted-foreground">HTTP {row.status}</span>

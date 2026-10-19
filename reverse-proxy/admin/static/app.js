@@ -24,6 +24,11 @@ const labels = {
   keys: ["API 密钥", "CLIENT ACCESS", "为每个客户端分配独立密钥，让连接清晰可控。"],
   settings: ["服务设置", "SERVICE SETTINGS", "服务名称等基础设置。"],
   test: ["连接测试", "CONNECTION LAB", "从当前账号发起请求，确认模型能否正常响应。"],
+  models: ["模型与用量", "MODEL CATALOG", "上游能提供哪些模型、各自多快，以及模型别名的改写规则。"],
+  tokens: ["管理令牌", "ACCESS TOKENS", "给脚本或第三方面板发一枚限定作用域的令牌，不必交出管理密钥。"],
+  users: ["管理用户", "CONSOLE USERS", "给后台开几个账号，只读还是可写由角色决定。"],
+  security: ["IP 安全", "INGRESS POLICY", "限制谁能访问这个控制台与转发端口，并查看被拦下的请求。"],
+  audit: ["审计日志", "AUDIT TRAIL", "谁在什么时候改了什么。这里只读，清空动作本身也会留下记录。"],
   guide: ["接入指南", "GET CONNECTED", "从导入凭据到客户端接入，只需几步。"]
 };
 /* 线性图标。原先用 👁 / 🙈 emoji，与整页的线性描边风格不一致，也受系统 emoji 字体影响。 */
@@ -99,6 +104,16 @@ function goPage(next) {
   // 用户管理与服务设置也在这里拉：这两页不进 30 秒轮询 ——
   // 设置是低频操作，轮询只会白白重画表单，把管理员正在输入的内容冲掉。
   if (next === "settings" && csrf) { loadSettings(); loadAlerts(); }
+  // 下面五页同理，都只在切页那一刻拉一次：
+  //   · 它们的表单很好填（密码、CIDR、令牌有效期），轮询会把填一半的内容冲掉；
+  //   · 数据本身变化极慢，30 秒刷一次纯属浪费。
+  // 缺这几行时的表现很容易被误判成「功能没做」：页面点得进去、表头都在，
+  // 只是一行数据也没有 —— 因为压根没发过请求。
+  if (next === "models" && csrf) loadModels();
+  if (next === "audit" && csrf) loadAudit();
+  if (next === "tokens" && csrf) loadTokens();
+  if (next === "users" && csrf) loadConsoleUsers();
+  if (next === "security" && csrf) loadSecurity();
 }
 /* 运行时长。两个口径，都要显示：
  *   session = 本次进程起来多久（重启归零）
@@ -181,6 +196,9 @@ function render() {
     $("default-max-concurrency").value = overview.pool?.default_max_concurrency ?? 0;
     $("default-min-interval").value = overview.pool?.default_min_interval ?? 0;
     $("max-total-concurrency").value = overview.pool?.max_total_concurrency ?? 0;
+  $("retry-enabled").checked = !!overview.pool?.retry_enabled;
+  $("retry-attempts").value = overview.pool?.retry_attempts ?? 0;
+  $("retry-backoff").value = overview.pool?.retry_backoff ?? 0;
   }
   const keyRow = k => `<tr><td><strong>${esc(k.name)}</strong>${k.realm ? `<small class="cell-note">${k.realm === "cn" ? "仅国内版" : "仅国际版"}</small>` : ""}</td><td><div class="secret-cell"><code data-secret="${esc(k.secret || k.hint)}" data-hidden="1">${esc(k.secret ? "•".repeat(12) : k.hint)}</code><button class="text-button reveal" data-reveal="${k.id}" title="显示 / 隐藏密钥" aria-label="显示或隐藏密钥">${ICON_EYE}</button>${k.secret ? `<button class="text-button" data-copy-key="${k.id}" title="复制密钥" aria-label="复制密钥">${ICON_COPY}</button>` : ""}</div></td><td>${keyStateCell(k)}</td><td class="muted mono">${esc(stamp(k.created * 1000))}</td><td>${groupTags(k.groups)}</td><td>${keyLimitCell(k)}</td><td class="align-right"><div class="actions"><button data-edit-key="${esc(k.id)}">编辑</button><button class="danger" data-revoke="${k.id}">撤销</button></div></td></tr>`;
   $("keys-body").innerHTML = keys.map(keyRow).join("")
@@ -826,8 +844,26 @@ function logRowsFiltered() {
   });
 }
 
+/** 单条请求的输出速率。分母只算"真正在生成"的那段（总耗时 − 首字耗时）。
+ *
+ * 三条规则和聚合层完全一致，任何一条不同都会让两处数字对不上：
+ * 失败请求不算（重试把耗时要摊进去）、0 token 不算（没有分母）、
+ * 首字时间必须早于总耗时（否则相减是负数）。非流式没有首字时间，
+ * 就拿整段耗时顶替 —— 算出来偏低，但不会凭空捏造。
+ */
+function logTps(r) {
+  if (!r || !r.ok) return "—";
+  const tokens = Number(r.tokens) || 0;
+  const total = Number(r.duration_ms) || 0;
+  const first = Number(r.first_token_ms) || 0;
+  if (tokens <= 0 || total <= 0) return "—";
+  const gen = first > 0 ? (first >= total ? 0 : total - first) : total;
+  if (gen <= 0) return "—";
+  return (tokens / (gen / 1000)).toFixed(1);
+}
+
 function logRowHtml(r) {
-  return `<tr><td class="mono muted">${esc(stamp(r.time * 1000))}</td><td>${esc(logAccountName(r))}${r.source === "test" ? '<span class="mini-active">测试</span>' : ""}<small class="cell-note mono">${r.account_id ? esc(r.account_id) : "—"}</small></td><td>${logKeyCell(r)}</td><td>${logGroupCell(r)}</td><td class="mono">${esc(r.model || "—")}</td><td><span class="pill ${LOG_TONES[r.outcome] || ""}">${esc(LOG_OUTCOMES[r.outcome] || r.outcome || "—")}</span><small class="cell-note">HTTP ${r.status ?? "—"}</small></td><td class="align-right mono">${logNumber(r.tokens)}</td><td class="align-right mono">${logCredit(r.credit)}</td><td class="align-right mono">${logNumber(r.duration_ms)} ms</td></tr>`;
+  return `<tr><td class="mono muted">${esc(stamp(r.time * 1000))}</td><td>${esc(logAccountName(r))}${r.source === "test" ? '<span class="mini-active">测试</span>' : ""}<small class="cell-note mono">${r.account_id ? esc(r.account_id) : "—"}</small></td><td>${logKeyCell(r)}</td><td>${logGroupCell(r)}</td><td class="mono">${esc(r.model || "—")}</td><td class="align-right mono">${logTps(r)}</td><td><span class="pill ${LOG_TONES[r.outcome] || ""}">${esc(LOG_OUTCOMES[r.outcome] || r.outcome || "—")}</span><small class="cell-note">HTTP ${r.status ?? "—"}</small></td><td class="align-right mono">${logNumber(r.tokens)}</td><td class="align-right mono">${logCredit(r.credit)}</td><td class="align-right mono">${logNumber(r.duration_ms)} ms</td></tr>`;
 }
 
 /** 按分组分节。组按「最新一条」排序，组内保持时间倒序 —— 顺序错了这页就没用。 */
@@ -849,7 +885,7 @@ function renderLogGroups(rows) {
   const sections = [...byBucket.values()]
     .map(s => ({...s, rows: s.rows.slice().sort((a, b) => (b.time || 0) - (a.time || 0))}))
     .sort((a, b) => (b.rows[0]?.time || 0) - (a.rows[0]?.time || 0));
-  box.innerHTML = sections.map(s => `<section class="log-group-section"><header><h3>${esc(s.label)} <span class="count-badge">${logNumber(s.rows.length)}</span></h3><small class="muted">${logNumber(s.tokens)} tokens · ${logCredit(s.credit)} 积分${s.label === LOG_GROUP_MULTI ? ' · 绑了多个分组的密钥，自成一类（不重复计入各分组）' : ""}</small></header><div class="table-wrap"><table><thead><tr><th>时间</th><th>账号</th><th>密钥</th><th>分组</th><th>模型</th><th>结果</th><th class="align-right">Token</th><th class="align-right">积分</th><th class="align-right">耗时</th></tr></thead><tbody>${s.rows.map(logRowHtml).join("")}</tbody></table></div></section>`).join("");
+  box.innerHTML = sections.map(s => `<section class="log-group-section"><header><h3>${esc(s.label)} <span class="count-badge">${logNumber(s.rows.length)}</span></h3><small class="muted">${logNumber(s.tokens)} tokens · ${logCredit(s.credit)} 积分${s.label === LOG_GROUP_MULTI ? ' · 绑了多个分组的密钥，自成一类（不重复计入各分组）' : ""}</small></header><div class="table-wrap"><table><thead><tr><th>时间</th><th>账号</th><th>密钥</th><th>分组</th><th>模型</th><th class="align-right">tok/s</th><th>结果</th><th class="align-right">Token</th><th class="align-right">积分</th><th class="align-right">耗时</th></tr></thead><tbody>${s.rows.map(logRowHtml).join("")}</tbody></table></div></section>`).join("");
 }
 
 let logView = "flat";
@@ -869,7 +905,7 @@ function applyLogFilter() {
   $("log-grouped-view").hidden = logView !== "grouped";
   if (logView === "flat") {
     $("logs-body").innerHTML = rows.map(logRowHtml).join("")
-      || '<tr><td colspan="9" class="history-empty">没有符合筛选条件的记录。</td></tr>';
+      || '<tr><td colspan="10" class="history-empty">没有符合筛选条件的记录。</td></tr>';
   } else {
     renderLogGroups(rows);
   }
@@ -891,10 +927,30 @@ async function loadTaskLogs() {
     // 在本地过滤会把「被别的类别挤出这一页」的记录彻底漏掉。
     taskLogs = await api("pool/checkin-logs?limit=100" + (kind ? "&kind=" + encodeURIComponent(kind) : ""));
     renderTaskLogs();
+    loadTaskSummary();
   } catch (e) {
     $("task-logs-body").innerHTML = `<tr><td colspan="5" class="history-empty">任务流水读取失败：${esc(e.message)}</td></tr>`;
   }
 }
+/** 任务汇总：每类成功/失败/成功率/最近一次。与明细表是两次请求——
+ * 一个读"最近 100 条"，一个读"最近 24 小时按类别计数"，口径不同不能合并。 */
+async function loadTaskSummary() {
+  const box = $("task-summary");
+  if (!box) return;
+  try {
+    const data = await api("pool/checkin-logs/summary?hours=24");
+    const rows = (data.kinds || []).map(k => {
+      const tone = !k.total ? "muted" : (k.failed ? "amber" : "green");
+      const last = k.last ? stamp(k.last * 1000) : "—";
+      const rate = k.total ? Math.round(k.success_rate * 100) + "%" : "—";
+      return `<div class="task-summary-card"><div class="task-summary-head">${esc(TASK_KINDS[k.kind] || k.kind)}<span class="pill ${tone}">${k.ok}/${k.total}</span></div><small class="cell-note">成功率 ${rate} · 最近 ${esc(last)}</small></div>`;
+    }).join("");
+    box.innerHTML = rows || "";
+  } catch (e) {
+    box.innerHTML = `<p class="history-empty">任务汇总读取失败：${esc(e.message)}</p>`;
+  }
+}
+
 function renderTaskLogs() {
   $("task-log-badge").textContent = taskLogs.length;
   $("task-logs-body").innerHTML = taskLogs.map(r => {
@@ -903,6 +959,494 @@ function renderTaskLogs() {
     return `<tr><td class="mono muted">${esc(stamp(r.time * 1000))}</td><td>${esc(r.name || r.id || "—")}</td><td>${esc(kind)}</td><td><span class="pill ${r.ok ? "green" : "red"}">${r.ok ? "成功" : "失败"}</span><small class="cell-note">${r.source === "auto" ? "自动" : "手动"}</small></td><td>${esc(r.message || "")}${credits}</td></tr>`;
   }).join("") || '<tr><td colspan="5" class="history-empty">还没有任务记录。开启自动任务，或到账号列表点「签到 / 派旅行」。</td></tr>';
 }
+// ── 模型目录 ────────────────────────────────────────────────────────
+// 模型清单挂在 /admin/api/models：每条的 tags 决定它是不是限时免费。
+// 这里刻意不拿 credits 文案去猜免费与否 —— 那个字段是展示用的。
+let modelCatalog = [];
+let modelFreeOnly = false;
+
+async function loadModels() {
+  const body = $("models-body");
+  if (!body) return;
+  try {
+    const data = await api("models");
+    modelCatalog = data.models || [];
+    renderModelsPage();
+    renderAliases(data.aliases || {}, data.known_models || []);
+    renderKeyFreeModels();
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="8" class="history-empty">模型目录读取失败：${esc(e.message)}</td></tr>`;
+  }
+  loadUsageSpeed();
+}
+
+/** 每模型的输出速率。与请求日志里的 tok/s 列、以及后端 usage.py 同口径。 */
+async function loadUsageSpeed() {
+  const body = $("usage-speed-body");
+  if (!body) return;
+  try {
+    const data = await api("usage/stats?days=30&hours=24");
+    const rows = (data.throughput || []).filter(r => r.calls > 0);
+    body.innerHTML = rows.map(r => `<tr>
+      <td class="mono">${esc(r.model || "—")}</td>
+      <td class="align-right mono">${r.tokens_per_sec == null ? "—" : r.tokens_per_sec.toFixed(1)}</td>
+      <td class="align-right mono muted">${r.throughput_samples || 0}</td>
+      <td class="align-right mono">${r.calls || 0}</td>
+      <td class="align-right mono">${r.failed || 0}</td>
+      <td class="align-right mono">${r.tokens || 0}</td>
+    </tr>`).join("") || '<tr><td colspan="6" class="history-empty">这 30 天还没有成功的调用，算不出速率。</td></tr>';
+    renderUsageCards(data.totals || {});
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="6" class="history-empty">用量读取失败：${esc(e.message)}</td></tr>`;
+  }
+}
+
+function renderUsageCards(totals) {
+  const host = $("usage-cards");
+  if (!host) return;
+  const daily = totals.daily || {};
+  const cards = [
+    ["调用（今日）", String(daily.calls || 0)],
+    ["失败率（今日）", daily.calls ? ((daily.failure_rate || 0) * 100).toFixed(1) + "%" : "—"],
+    ["Token（今日）", String(daily.tokens || 0)],
+    ["首字延迟（均）", daily.first_token_ms_avg ? Math.round(daily.first_token_ms_avg) + " ms" : "—"],
+  ];
+  host.innerHTML = cards.map(([label, value]) => `<div class="usage-card"><small>${esc(label)}</small>`
+    + `<strong>${esc(value)}</strong></div>`).join("");
+}
+
+let aliasRows = [];
+function renderAliases(aliases, known) {
+  aliasRows = Object.entries(aliases || {}).map(([from, to]) => ({ from, to: String(to) }));
+  const body = $("alias-body");
+  if (!body) return;
+  const knownSet = new Set(known || []);
+  body.innerHTML = aliasRows.map((r, i) => {
+    // 目标不在已知模型里时提醒，但不禁止：新模型上架前先配好别名是常见需求。
+    const warn = knownSet.size && !knownSet.has(r.to)
+      ? '<span class="pill amber">未知模型</span>' : '<span class="pill green">可用</span>';
+    return `<tr><td class="mono">${esc(r.from)}</td><td class="mono">${esc(r.to)}</td><td>${warn}</td>`
+      + `<td class="align-right"><button class="text-button" data-alias-del="${i}" type="button">删除</button></td></tr>`;
+  }).join("") || '<tr><td colspan="4" class="history-empty">还没有别名。客户端直接用上游模型名即可。</td></tr>';
+}
+
+async function saveAliases() {
+  const map = {};
+  for (const r of aliasRows) {
+    if (!r.from || !r.to) continue;
+    if (r.from === r.to) continue; // 自己指向自己没有意义，后端也会丢掉
+    map[r.from] = r.to;
+  }
+  try {
+    const data = await api("model-aliases", { method: "POST", body: { aliases: map } });
+    toast("别名已保存");
+    renderAliases(data.aliases || map, data.known_models || []);
+  } catch (e) {
+    toast("保存失败：" + e.message);
+  }
+}
+
+function modelMatches(m, q) {
+  if (modelFreeOnly && !m.free) return false;
+  if (!q) return true;
+  const hay = [m.id, m.name, m.vendor, (m.aliases || []).join(" ")].join(" ").toLowerCase();
+  return hay.includes(q);
+}
+
+function renderModelsPage() {
+  const body = $("models-body");
+  if (!body) return;
+  const q = ($("models-search").value || "").trim().toLowerCase();
+  const rows = modelCatalog.filter(m => modelMatches(m, q));
+  const freeCount = modelCatalog.filter(m => m.free).length;
+  const badge = $("models-free-only");
+  if (badge && badge.parentElement) {
+    badge.parentElement.lastChild.textContent = ` 只看限时免费（${freeCount}）`;
+  }
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="8" class="history-empty">${modelCatalog.length ? "没有匹配的模型" : "本机还没拿到模型目录"}</td></tr>`;
+    return;
+  }
+  body.innerHTML = rows.map(m => {
+    const ctx = m.context_window ? fmtK(m.context_window) : (m.max_input_tokens ? "≤" + fmtK(m.max_input_tokens) : "—");
+    const out = m.max_output_tokens ? fmtK(m.max_output_tokens) : "—";
+    const caps = [];
+    if (m.supports_tool_call) caps.push("工具");
+    if (m.supports_images) caps.push("图片");
+    if (m.supports_reasoning) caps.push(m.only_reasoning ? "仅思考" : "思考");
+    const aliases = (m.aliases || []).map(a => `<code>${esc(a)}</code>`).join(" ");
+    const freeTag = m.free ? '<span class="pill green">限时免费</span>' : "";
+    return `<tr><td><div class="cell-main">${esc(m.name || m.id)} ${freeTag}</div><small class="cell-note mono">${esc(m.id)}</small></td>`
+      + `<td>${esc(m.vendor || "—")}</td><td class="mono">${ctx}</td><td class="mono">${out}</td>`
+      + `<td>${caps.length ? esc(caps.join(" / ")) : "—"}</td><td class="mono">${esc(m.credits || "—")}</td>`
+      + `<td>${aliases || "—"}</td><td class="mono">${m.key_count == null ? "—" : m.key_count}</td></tr>`;
+  }).join("");
+}
+
+function fmtK(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(n % 1000000 ? 1 : 0) + "M";
+  if (n >= 1000) return (n / 1000).toFixed(n % 1000 ? 1 : 0) + "K";
+  return String(n);
+}
+
+// ── 审计日志 ────────────────────────────────────────────────────────
+async function loadAudit() {
+  const body = $("audit-body");
+  if (!body) return;
+  try {
+    const rows = await api("audit-logs?limit=200");
+    body.innerHTML = rows.map(r => `<tr><td class="mono muted">${esc(stamp(r.time * 1000))}</td><td>${esc(r.actor || "—")}</td>`
+      + `<td class="mono">${esc(r.action || "")}</td><td class="mono muted">${esc(r.target || "—")}</td>`
+      + `<td class="muted">${esc(r.detail || "—")}</td></tr>`).join("")
+      || '<tr><td colspan="5" class="history-empty">还没有审计记录。</td></tr>';
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="5" class="history-empty">审计日志读取失败：${esc(e.message)}</td></tr>`;
+  }
+}
+
+// ── 管理令牌 / 管理用户 / IP 安全 ────────────────────────────────────
+//
+// 这三页与「服务设置」同一档：都是**低频运维操作**，所以不进 30 秒轮询。
+// 轮询会把管理员正在填的表单冲掉，而这三页的表单比别处更贵——
+// 填一半的密码、填一半的 CIDR 被冲掉，用户只会觉得「这破站老丢我的输入」。
+
+/** 会话能力边界。
+ *
+ * 判据是 `via`，只有 GET /admin/api/session 会返回（登录响应里没有）：
+ *   账号密码登录      -> "session"  高危接口可用
+ *   管理密钥 / 令牌登录 -> 其它        服务端 403
+ *
+ * 拿不到会话信息时**保守放行**：宁可由服务端拒绝并给出准确文案，
+ * 也不要因为前端猜错，把本来能用的功能藏起来。
+ */
+function canUseHighRisk() {
+  if (!sessionInfo) return true;
+  return sessionInfo.via !== "token" && sessionInfo.via !== "key";
+}
+
+/** 高危不可用时统一文案。重点是「换个登录方式就能用」，而不是「这功能没有」。 */
+const HIGH_RISK_NOTE = "用管理密钥 / 管理令牌登录时，控制台账号的增删改与安全策略不可用 —— 请改用账号密码登录。";
+
+let consoleUsers = [];
+
+function secretCell(token) {
+  return `<span class="mono">${esc(token.prefix || "")}…</span>`;
+}
+
+async function loadTokens() {
+  const body = $("tokens-body");
+  if (!body) return;
+  try {
+    const rows = await api("tokens");
+    body.innerHTML = rows.map(t => `<tr>
+      <td><div class="cell-main">${esc(t.name || "—")}</div><small class="cell-note mono">${secretCell(t)}</small></td>
+      <td><span class="pill ${t.scope === "admin" ? "amber" : "muted"}">${t.scope === "admin" ? "管理员" : "只读"}</span></td>
+      <td><span class="pill ${t.enabled ? "green" : "muted"}">${t.enabled ? "启用" : "停用"}</span>
+        <small class="cell-note">${t.expires_at ? "至 " + esc(stamp(t.expires_at * 1000)) : "永不过期"}</small></td>
+      <td><small class="cell-note">创建 ${esc(t.created_at ? stamp(t.created_at * 1000) : "—")}</small>
+        <small class="cell-note">最近 ${t.last_used_at ? esc(stamp(t.last_used_at * 1000)) + " · " + esc(t.last_used_ip || "—") : "从未使用"}</small>
+        ${t.created_by ? `<small class="cell-note">by ${esc(t.created_by)}</small>` : ""}</td>
+      <td class="align-right"><div class="row-actions">
+        <button class="button ghost" data-token-toggle="${esc(t.id)}" data-next="${t.enabled ? "0" : "1"}" type="button">${t.enabled ? "停用" : "启用"}</button>
+        <button class="button ghost danger" data-token-delete="${esc(t.id)}" data-name="${esc(t.name)}" type="button">删除</button>
+      </div></td></tr>`).join("")
+      || '<tr><td colspan="5" class="history-empty">还没有管理令牌。只读令牌适合监控脚本；管理员令牌适合自动化运维。</td></tr>';
+  } catch (e) {
+    // 这里最常见的失败是「用低权限身份进来了」，不是服务挂了。
+    // 文案必须说清是权限，否则用户会去重启服务。
+    body.innerHTML = `<tr><td colspan="5" class="history-empty">读取失败（多半是当前登录方式没有权限）：${esc(e.message)}</td></tr>`;
+  }
+}
+
+async function loadConsoleUsers() {
+  const body = $("users-body");
+  const self = $("users-self");
+  if (!body) return;
+  const me = sessionInfo || {};
+  if (self) {
+    self.innerHTML = `<span>当前登录：<b>${esc(me.username || "—")}</b></span>`
+      + `<span class="pill ${me.role === "admin" ? "amber" : "muted"}">${me.role === "admin" ? "管理员" : "只读"}</span>`
+      + `<span class="muted">登录方式：${esc(me.via === "token" ? "管理令牌" : me.via === "key" ? "管理密钥" : "账号密码")}</span>`
+      // 这个 id 是**渲染期**出现的（不在 index.html 里），静态自检会报一次 missing，属预期。
+      + '<button class="button ghost danger" id="revoke-sessions" type="button">吊销我的全部会话</button>';
+    const revoke = $("revoke-sessions");
+    if (revoke) revoke.addEventListener("click", () => confirmAction(
+      "吊销自己全部会话？",
+      "所有已登录的浏览器会话（含当前这次）都会立即失效，需要重新登录。",
+      async () => {
+        const result = await api("sessions/revoke", {method: "POST"});
+        showLogin();
+        return `已吊销 ${result.revoked} 个会话，请重新登录`;
+      },
+    ));
+  }
+  try {
+    consoleUsers = await api("users");
+    body.innerHTML = consoleUsers.map(u => {
+      const isSelf = u.username === (me.username || "");
+      return `<tr><td>${esc(u.username)}${isSelf ? ' <small class="cell-note">（我）</small>' : ""}</td>
+        <td><select data-user-role="${esc(u.username)}">
+          <option value="admin"${u.role === "admin" ? " selected" : ""}>管理员</option>
+          <option value="viewer"${u.role === "viewer" ? " selected" : ""}>只读</option>
+        </select></td>
+        <td class="align-right"><div class="row-actions">
+          <button class="button ghost" data-user-password="${esc(u.username)}" type="button">改密码</button>
+          <button class="button ghost danger" data-user-delete="${esc(u.username)}" type="button"${isSelf ? " disabled title=\"不能删除当前登录用户\"" : ""}>删除</button>
+        </div></td></tr>`;
+    }).join("") || '<tr><td colspan="3" class="history-empty">首次启动会自动创建 admin 用户。</td></tr>';
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="3" class="history-empty">读取失败（多半是当前登录方式没有权限）：${esc(e.message)}</td></tr>`;
+  }
+}
+
+let ipRules = [];
+
+async function loadSecurity() {
+  if (!$("rules-body")) return;
+  try {
+    const [config, rules, logs] = await Promise.all([
+      api("security/config"), api("security/rules"), api("security/logs?limit=200"),
+    ]);
+    $("security-enabled").checked = !!config.enabled;
+    $("security-mode").value = config.mode || "blacklist";
+    ipRules = rules;
+    $("security-rule-count").textContent = String(rules.length);
+    $("rules-body").innerHTML = rules.map(r => `<tr>
+      <td><span class="pill ${r.kind === "allow" ? "green" : "red"}">${r.kind === "allow" ? "放行" : "拒绝"}</span></td>
+      <td class="mono">${esc(r.cidr)}</td>
+      <td class="muted">${esc(r.note || "—")}</td>
+      <td class="mono muted">${esc(r.created_at ? stamp(r.created_at * 1000) : "—")}</td>
+      <td class="align-right"><button class="button ghost danger" data-rule-delete="${esc(r.id)}" data-cidr="${esc(r.cidr)}" type="button">删除</button></td>
+    </tr>`).join("") || '<tr><td colspan="5" class="history-empty">暂无规则。添加一条放行或拒绝规则。</td></tr>';
+
+    $("security-log-count").textContent = String(logs.length);
+    $("ip-logs-body").innerHTML = logs.map(l => `<tr>
+      <td class="mono muted">${esc(stamp((l.ts || 0) * 1000))}</td>
+      <td class="mono">${esc(l.ip || "—")}</td>
+      <td class="mono">${esc(l.path || "—")}</td>
+      <td><span class="pill ${l.blocked ? "red" : "green"}">${l.blocked ? "拦截" : "放行"}</span></td>
+    </tr>`).join("") || '<tr><td colspan="4" class="history-empty">暂无访问记录。启用 IP 管控后，请求会被记录在此。</td></tr>';
+
+    // 白名单 + 零放行 = 所有人（含本机）都进不来。这条必须在界面上顶出来：
+    // 用户一旦保存就会立刻失联，而失联之后再也点不到这个页面来救。
+    const stuck = !!config.enabled && config.mode === "whitelist" && !rules.some(r => r.kind === "allow");
+    const warn = $("security-warn");
+    warn.hidden = !stuck;
+    if (stuck) {
+      // 红条里必须直接给出**本机这次请求的来源地址**：一旦被挡，用户就再也
+      // 点不到这个页面来查它了。给个按钮比让他自己想办法查 IP 现实得多。
+      const ip = config.current_ip || "";
+      warn.innerHTML = "当前是白名单模式且没有任何放行规则：所有请求（含本机）都会被拒绝。"
+        + (ip ? `<br>本机现在的地址是 <code class="mono">${esc(ip)}</code> —— 先放行它再启用。` : "")
+        + '<br><button class="button" id="security-warn-fix" type="button">一键放行本机</button>';
+      const fix = $("security-warn-fix");
+      if (fix) fix.addEventListener("click", async () => {
+        if (!ip) { toast("本次请求没拿到来源 IP"); return; }
+        try {
+          await api("security/rules", {method: "POST", body: {kind: "allow", cidr: ip, note: "本机（自动放行）"}});
+          await loadSecurity();
+          toast(`已放行 ${ip}`);
+        } catch (err) { toast(err.message); }
+      });
+    }
+  } catch (e) {
+    $("rules-body").innerHTML = `<tr><td colspan="5" class="history-empty">读取失败：${esc(e.message)}</td></tr>`;
+  }
+}
+
+async function saveSecurityConfig(patch) {
+  try {
+    await api("security/config", {method: "POST", body: patch});
+    await loadSecurity();
+    toast("安全策略已保存");
+  } catch (e) { toast(e.message); }
+}
+
+$("tokens-refresh").addEventListener("click", () => loadTokens());
+$("tokens-add").addEventListener("click", () => {
+  if (!canUseHighRisk()) { toast(HIGH_RISK_NOTE); return; }
+  $("token-name").value = ""; $("token-days").value = "0"; $("token-scope").value = "readonly";
+  $("token-error").hidden = true; $("token-form").hidden = false; $("token-name").focus();
+});
+$("token-cancel").addEventListener("click", () => { $("token-form").hidden = true; });
+$("token-copy").addEventListener("click", () => copy($("token-value").textContent));
+$("token-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const days = Number($("token-days").value || 0);
+  // 有效期按「从现在起算 N 天」换算成绝对时间戳，与桌面端同口径。
+  // 0 发 null 而不是 0：0 会被服务端当成「已过期」。
+  const expires = days > 0 ? Math.floor(Date.now() / 1000) + Math.round(days * 86400) : null;
+  try {
+    const created = await api("tokens", {method: "POST", body: {
+      name: $("token-name").value.trim(), scope: $("token-scope").value, expires_at: expires,
+    }});
+    $("token-form").hidden = true;
+    $("token-issued").hidden = false;
+    $("token-value").textContent = created.token;
+    await loadTokens();
+  } catch (err) { $("token-error").textContent = err.message; $("token-error").hidden = false; }
+});
+$("tokens-body").addEventListener("click", e => {
+  const toggle = e.target.closest("[data-token-toggle]");
+  if (toggle) {
+    api(`tokens/${toggle.dataset.tokenToggle}`, {method: "PATCH", body: {enabled: toggle.dataset.next === "1"}})
+      .then(loadTokens).catch(err => toast(err.message));
+    return;
+  }
+  const remove = e.target.closest("[data-token-delete]");
+  if (remove) confirmAction("删除这个管理令牌？", `使用「${remove.dataset.name}」的自动化脚本将立即失效。`, async () => {
+    await api(`tokens/${remove.dataset.tokenDelete}`, {method: "DELETE"});
+    await loadTokens();
+    return "令牌已删除";
+  });
+});
+
+$("users-refresh").addEventListener("click", () => loadConsoleUsers());
+$("users-add").addEventListener("click", () => {
+  if (!canUseHighRisk()) { toast(HIGH_RISK_NOTE); return; }
+  $("user-username").value = ""; $("user-password").value = ""; $("user-role").value = "viewer";
+  $("user-error").hidden = true; $("user-form").hidden = false; $("user-username").focus();
+});
+$("user-cancel").addEventListener("click", () => { $("user-form").hidden = true; });
+$("user-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const password = $("user-password").value;
+  if (password.length < 8) { $("user-error").textContent = "密码至少 8 位"; $("user-error").hidden = false; return; }
+  try {
+    await api("users", {method: "POST", body: {
+      username: $("user-username").value.trim(), password, role: $("user-role").value,
+    }});
+    $("user-form").hidden = true;
+    await loadConsoleUsers();
+    toast("用户已创建");
+  } catch (err) { $("user-error").textContent = err.message; $("user-error").hidden = false; }
+});
+$("users-body").addEventListener("change", async e => {
+  const role = e.target.closest("[data-user-role]");
+  if (!role) return;
+  try {
+    const result = await api(`users/${encodeURIComponent(role.dataset.userRole)}`, {method: "PATCH", body: {role: role.value}});
+    // 改自己的角色会顺带吊销自己的会话 —— 不重新登录就没法继续操作了。
+    if (result.relogin_required) { toast("角色已变更，请重新登录"); showLogin(); return; }
+    await loadConsoleUsers();
+    toast("角色已更新");
+  } catch (err) { toast(err.message); await loadConsoleUsers(); }
+});
+$("users-body").addEventListener("click", e => {
+  const pwd = e.target.closest("[data-user-password]");
+  if (pwd) {
+    const username = pwd.dataset.userPassword;
+    // 复用确认弹窗的输入框当密码框：它已经带了「回填 + 校验 + 焦点」这套逻辑，
+    // 另起一个只为一处服务的弹窗不如直接把 input 的 type 改掉。
+    // **用完必须还原**：这个弹窗是全局复用的，type 留在 password 上会让下一次
+    // 「改账号备注」的确认框变成一个看不见字的密码框。
+    const input = $("rename-value"), label = $("rename-label");
+    const prevType = input.type, prevLabel = label.textContent;
+    input.type = "password"; label.textContent = "新密码（至少 8 位）";
+    const restore = () => { input.type = prevType || "text"; label.textContent = prevLabel; };
+    confirmAction(`修改「${username}」的密码`, "至少 8 位。该用户已登录的会话会立即失效。", async () => {
+      try {
+        const next = input.value;
+        if (!next || next.length < 8) throw new Error("密码至少 8 位");
+        const result = await api(`users/${encodeURIComponent(username)}`, {method: "PATCH", body: {password: next}});
+        if (result.relogin_required) { showLogin(); return "密码已更新，请重新登录"; }
+        await loadConsoleUsers();
+        return "密码已更新";
+      } finally { restore(); }
+    }, "");
+    return;
+  }
+  const del = e.target.closest("[data-user-delete]");
+  if (del) confirmAction("删除这个用户？", `「${del.dataset.userDelete}」将无法再登录，其会话立即失效。`, async () => {
+    await api(`users/${encodeURIComponent(del.dataset.userDelete)}`, {method: "DELETE"});
+    await loadConsoleUsers();
+    return "用户已删除";
+  });
+});
+
+$("security-refresh").addEventListener("click", () => loadSecurity());
+$("security-enabled").addEventListener("change", () => {
+  saveSecurityConfig({enabled: $("security-enabled").checked, mode: $("security-mode").value});
+});
+$("security-mode").addEventListener("change", () => {
+  // 切到白名单之前先说一句：没放行规则时保存下去，下一次刷新就进不来了。
+  if ($("security-mode").value === "whitelist" && !ipRules.some(r => r.kind === "allow")) {
+    toast("已切到白名单但没有放行规则：建议先加一条 127.0.0.1");
+  }
+  saveSecurityConfig({enabled: $("security-enabled").checked, mode: $("security-mode").value});
+});
+$("rule-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  try {
+    await api("security/rules", {method: "POST", body: {
+      kind: $("rule-kind").value, cidr: $("rule-cidr").value.trim(), note: $("rule-note").value.trim(),
+    }});
+    $("rule-cidr").value = ""; $("rule-note").value = ""; $("rule-error").hidden = true;
+    await loadSecurity();
+    toast("规则已添加");
+  } catch (err) { $("rule-error").textContent = err.message; $("rule-error").hidden = false; }
+});
+$("rules-body").addEventListener("click", e => {
+  const del = e.target.closest("[data-rule-delete]");
+  if (del) confirmAction("删除这条规则？", del.dataset.cidr, async () => {
+    await api(`security/rules/${del.dataset.ruleDelete}`, {method: "DELETE"});
+    await loadSecurity();
+    return "规则已删除";
+  });
+});
+$("security-log-clear").addEventListener("click", () => confirmAction("清空访问日志？", "只清访问记录，规则与开关不受影响。", async () => {
+  await api("security/logs/clear", {method: "POST"});
+  await loadSecurity();
+  return "访问日志已清空";
+}));
+
+$("models-free-only").addEventListener("change", () => {
+  modelFreeOnly = $("models-free-only").checked;
+  renderModelsPage();
+});
+$("models-search").addEventListener("input", renderModelsPage);
+$("models-refresh").addEventListener("click", () => loadModels());
+const freeHost = $("key-free-models");
+if (freeHost) freeHost.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-free-model]");
+  if (!btn || btn.disabled) return;
+  const id = btn.dataset.freeModel;
+  const names = splitLines($("key-models").value);
+  if (!names.includes(id)) names.push(id);
+  $("key-models").value = names.join("\n");
+  renderKeyFreeModels();
+});
+const keyModelsBox = $("key-models");
+if (keyModelsBox) keyModelsBox.addEventListener("input", renderKeyFreeModels);
+const aliasAdd = $("alias-add");
+if (aliasAdd) aliasAdd.addEventListener("click", () => {
+  const from = ($("alias-from").value || "").trim();
+  const to = ($("alias-to").value || "").trim();
+  if (!from || !to) { toast("别名与目标模型都要填"); return; }
+  if (from === to) { toast("别名和目标模型相同，不需要映射"); return; }
+  const hit = aliasRows.find(r => r.from === from);
+  if (hit) hit.to = to; else aliasRows.push({ from, to });
+  $("alias-from").value = ""; $("alias-to").value = "";
+  renderAliases(Object.fromEntries(aliasRows.map(r => [r.from, r.to])),
+                (modelCatalog || []).map(m => m.id));
+});
+const aliasSave = $("alias-save");
+if (aliasSave) aliasSave.addEventListener("click", () => saveAliases());
+const aliasBody = $("alias-body");
+if (aliasBody) aliasBody.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-alias-del]");
+  if (!btn) return;
+  aliasRows.splice(Number(btn.dataset.aliasDel), 1);
+  renderAliases(Object.fromEntries(aliasRows.map(r => [r.from, r.to])),
+                (modelCatalog || []).map(m => m.id));
+});
+$("audit-refresh").addEventListener("click", () => loadAudit());
+$("audit-clear").addEventListener("click", () => confirmAction("清空审计日志？", "只清掉历史记录；清空这个动作本身会作为一条新记录留下。", async () => {
+  const result = await api("audit-logs/clear", {method: "POST"});
+  await loadAudit();
+  return `已清空 ${result.removed} 条`;
+}));
+
 $("task-log-kind").addEventListener("change", () => loadTaskLogs());
 $("task-log-refresh").addEventListener("click", () => loadTaskLogs());
 $("task-log-clear").addEventListener("click", () => confirmAction("清空任务流水？", "只清空这份记录，不影响账号、积分与旅行状态。", async () => {
@@ -924,12 +1468,22 @@ async function refresh() {
     if (page === "egress" && !$("egress-accounts-body").contains(document.activeElement)) await loadEgress();
     // 自动任务流水同理：只在账号页拉，别让每次 30 秒轮询都多打一次接口。
     if (page === "accounts") await loadTaskLogs();
+  if (page === "models") await loadModels();
+  if (page === "audit") await loadAudit();
+    if (page === "tokens") await loadTokens();
+    if (page === "users") await loadConsoleUsers();
+    if (page === "security") await loadSecurity();
     // 计费页有成本：三个接口 + 两张表。同样只在当前页时才拉。
   }
   catch (e) { $("load-error").textContent = e.message; $("load-error").hidden = false; throw e; }
   finally { $("refresh").disabled = false; }
 }
 async function enter() { $("boot").hidden = true; $("login").hidden = true; $("workspace").hidden = false; renderVersion(sessionInfo || bootVersion); goPage(location.hash.slice(1)); await refresh(); }
+
+/* 浏览器前进/后退只改 hash，不发请求也不触发任何回调。
+ * 不监听的话：从 tokens 页后退会回到 audit 页的地址，但界面上还是 tokens ——
+ * 地址和内容各说各话，用户只能刷新。 */
+window.addEventListener("hashchange", () => { if (!csrf) return; const want = location.hash.slice(1); if (want && want !== page) goPage(want); });
 document.querySelectorAll("[data-login-mode]").forEach(b => b.addEventListener("click", () => setLoginMode(b.dataset.loginMode)));
 $("login-form").addEventListener("submit", async e => {
   e.preventDefault(); const button = e.submitter || $("login-form").querySelector('button[type="submit"]'); button.disabled = true; $("login-error").textContent = "";
@@ -958,7 +1512,7 @@ $("batch-checkin").addEventListener("click", () => batchAction("checkin"));
 $("batch-travel").addEventListener("click", () => confirmAction("批量派猫猫旅行？", "会以每个启用账号的身份向成长中心发起真实派发请求；已在旅途中或今日已派的账号自动跳过。", () => batchAction("travel")));
 // 活跃上报同样是对上游的真实写请求，批量入口先确认一次。
 $("batch-active").addEventListener("click", () => confirmAction("批量活跃上报？", "会以每个启用账号的身份向上游发送一条 chat_request_send 事件，每号每天一轮；国际版账号与今日已上报的账号自动跳过。", () => batchAction("active")));
-$("pool-settings").addEventListener("submit", async e => { e.preventDefault();e.submitter.disabled=true;try {await api("pool/settings",{method:"PATCH",body:{routing:$("pool-routing").value,auto_checkin:$("auto-checkin").checked,checkin_time:$("checkin-time").value,auto_travel:$("auto-travel").checked,travel_time:$("travel-time").value,auto_keepalive:$("auto-keepalive").checked,keepalive_hours:Number($("keepalive-hours").value),auto_active:$("auto-active").checked,active_time:$("active-time").value,active_reports:Number($("active-reports").value),wb2api_base:$("wb2api-base").value.trim(),wb2api_key:$("wb2api-key").value.trim(),default_weight:Number($("default-weight").value),default_max_concurrency:Number($("default-max-concurrency").value),default_min_interval:Number($("default-min-interval").value),max_total_concurrency:Number($("max-total-concurrency").value)}});await refresh();toast("账号池设置已保存");}catch(err){toast(err.message);}finally{e.submitter.disabled=false;} });
+$("pool-settings").addEventListener("submit", async e => { e.preventDefault();e.submitter.disabled=true;try {await api("pool/settings",{method:"PATCH",body:{routing:$("pool-routing").value,auto_checkin:$("auto-checkin").checked,checkin_time:$("checkin-time").value,auto_travel:$("auto-travel").checked,travel_time:$("travel-time").value,auto_keepalive:$("auto-keepalive").checked,keepalive_hours:Number($("keepalive-hours").value),auto_active:$("auto-active").checked,active_time:$("active-time").value,active_reports:Number($("active-reports").value),wb2api_base:$("wb2api-base").value.trim(),wb2api_key:$("wb2api-key").value.trim(),default_weight:Number($("default-weight").value),default_max_concurrency:Number($("default-max-concurrency").value),default_min_interval:Number($("default-min-interval").value),max_total_concurrency:Number($("max-total-concurrency").value),retry_enabled:$("retry-enabled").checked,retry_attempts:Number($("retry-attempts").value),retry_backoff:Number($("retry-backoff").value)}});await refresh();toast("账号池设置已保存");}catch(err){toast(err.message);}finally{e.submitter.disabled=false;} });
 setInterval(() => { if(csrf && overview && !document.hidden && !document.querySelector("dialog[open]") && !$("refresh").disabled) refresh().catch(()=>{}); },30000);
 document.querySelectorAll("[data-page]").forEach(b => b.addEventListener("click", () => goPage(b.dataset.page)));
 $("go-guide").addEventListener("click", () => goPage("guide"));
@@ -1425,6 +1979,31 @@ function splitLines(value) {
   return String(value || "").split(/[\n,]/).map(x => x.trim()).filter(Boolean);
 }
 
+/** 密钥弹窗里的「限时免费」快捷添加。
+ *
+ * 为什么不是复选框：那一栏是 textarea（每行一个模型名），旁边挂一个筛选开关
+ * 没有任何可过滤的对象，点了什么都不会发生。用户真正要的是「把免费的那几个
+ * 挑出来填进去」，所以做成一排芯片：点谁加谁，已经加进去的置灰。
+ *
+ * 一个免费模型都没有时**整块隐藏**，而不是显示"暂无" —— 上游配置里没有 tags
+ * 就一个都不免费，这时候留一块空区域只会让人以为功能坏了。
+ */
+function renderKeyFreeModels() {
+  const host = $("key-free-models");
+  if (!host) return;
+  const free = (modelCatalog || []).filter(m => m.free).map(m => m.id);
+  if (!free.length) {
+    host.hidden = true;
+    host.innerHTML = "";
+    return;
+  }
+  const picked = new Set(splitLines($("key-models").value));
+  host.hidden = false;
+  host.innerHTML = '<small class="cell-note">限时免费，点一下加入白名单：</small>'
+    + free.map(id => `<button type="button" class="chip" data-free-model="${esc(id)}"`
+      + `${picked.has(id) ? ' disabled' : ''}>${esc(id)}</button>`).join("");
+}
+
 /** 打开弹窗。`key` 为 null 时是创建，否则是编辑。 */
 function openKeyDialog(key) {
   const editing = Boolean(key);
@@ -1449,6 +2028,7 @@ function openKeyDialog(key) {
   $("created-key").hidden = true;
   $("key-error").textContent = "";
   fillKeyGroups(editing ? key.groups : []);
+  renderKeyFreeModels();
   $("key-dialog").showModal();
 }
 

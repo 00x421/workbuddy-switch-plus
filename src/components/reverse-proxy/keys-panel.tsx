@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Copy, Eye, EyeOff, KeyRound, Plus } from "lucide-react";
 
@@ -45,17 +45,23 @@ function splitList(value: string): string[] {
  * 现在把服务端 `converter.get_available_models()（overview.models）` 的清单直接列出来
  * 点着选；仍然允许手动输入清单里没有的名字（上游可能加了新模型）。
  */
-function ModelPicker({ value, options, onChange }: {
+function ModelPicker({ value, options, free, onChange }: {
   value: string[];
   options: string[];
+  /** 限时免费的模型。拉不到就是空集——不标色，绝不瞎标。 */
+  free?: Set<string>;
   onChange: (next: string[]) => void;
 }) {
   const [query, setQuery] = useState("");
+  const [freeOnly, setFreeOnly] = useState(false);
   const selected = new Set(value);
   const needle = query.trim().toLowerCase();
+  // 「只看免费」先过滤再截断：先切片会把后面的免费模型切掉，
+  // 表现为「勾了只看免费却只出来两个」，其实是被 60 条上限吃掉了。
+  const byFree = freeOnly && free && free.size > 0 ? options.filter((m) => free.has(m)) : options;
   const filtered = needle
-    ? options.filter((m) => m.toLowerCase().includes(needle)).slice(0, 60)
-    : options;
+    ? byFree.filter((m) => m.toLowerCase().includes(needle)).slice(0, 60)
+    : byFree;
 
   function toggle(model: string) {
     onChange(selected.has(model) ? value.filter((m) => m !== model) : [...value, model]);
@@ -134,11 +140,34 @@ function ModelPicker({ value, options, onChange }: {
       )}
 
       <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-        <span>点击即选中，再点一次取消。已选 {value.length} 个。</span>
+        <span className="flex items-center gap-3">
+          <span>点击即选中，再点一次取消。已选 {value.length} 个。</span>
+          {free && free.size > 0 ? (
+            <label className="flex cursor-pointer items-center gap-1">
+              <input
+                type="checkbox"
+                className="size-3"
+                checked={freeOnly}
+                onChange={(e) => setFreeOnly(e.target.checked)}
+              />
+              只看限时免费（{free.size}）
+            </label>
+          ) : null}
+        </span>
         {value.length > 0 ? (
           <button type="button" className="text-primary hover:underline" onClick={() => onChange([])}>清空</button>
         ) : null}
       </div>
+
+      {freeOnly && free && free.size > 0 ? (
+        <button
+          type="button"
+          className="self-start text-[11px] text-primary hover:underline"
+          onClick={() => onChange([...new Set([...value, ...filtered])])}
+        >
+          把当前筛出的 {filtered.length} 个全选
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -226,7 +255,26 @@ export function KeysPanel({ overview, reload }: { overview: RpOverview; reload: 
   const [creating, setCreating] = useState(false);
   const [issued, setIssued] = useState<{ name: string; key: string } | null>(null);
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
+  /**
+   * 限时免费的模型集合。
+   *
+   * `overview.models` 只有名字，没有免费标记——那个字段在 `/admin/api/models` 的
+   * `tags` 里。所以这里单独拉一次目录，失败就退化成空集（不标色），
+   * 不能让「拿不到免费列表」把整个密钥面板卡住。
+   */
+  const [freeModels, setFreeModels] = useState<Set<string>>(() => new Set());
   const confirm = useConfirm();
+
+  useEffect(() => {
+    let alive = true;
+    rp.modelCatalog()
+      .then((catalog) => {
+        if (!alive) return;
+        setFreeModels(new Set(catalog.models.filter((m) => m.free).map((m) => m.id)));
+      })
+      .catch(() => { /* 免费标记是锦上添花，拉不到就不标 */ });
+    return () => { alive = false; };
+  }, []);
 
   const keys = useMemo(() => [...overview.keys].sort((a, b) => (b.created ?? 0) - (a.created ?? 0)), [overview.keys]);
   // 有 secret 才能显示明文；旧的、创建于这个版本之前的条目只有 hint。
@@ -407,6 +455,7 @@ export function KeysPanel({ overview, reload }: { overview: RpOverview; reload: 
           open
           existing={editing}
           models={overview.models}
+          freeModels={freeModels}
           groups={groups}
           onOpenChange={(open) => { if (!open) { setCreating(false); setEditing(null); } }}
           onSaved={async (issuedKey, name) => {
@@ -440,11 +489,13 @@ export function KeysPanel({ overview, reload }: { overview: RpOverview; reload: 
   );
 }
 
-function KeyFormDialog({ open, existing, models, groups, onOpenChange, onSaved }: {
+function KeyFormDialog({ open, existing, models, freeModels, groups, onOpenChange, onSaved }: {
   open: boolean;
   existing: RpKey | null;
   /** 服务端当前可用的模型清单，用于白名单点选。 */
   models: string[];
+  /** 限时免费的模型（`models` 的子集）。目录拉不到就是空集。 */
+  freeModels: Set<string>;
   /** 可绑定的上游分组；为空时表单给一句引导而不是空白框。 */
   groups: RpGroup[];
   onOpenChange: (open: boolean) => void;
@@ -546,6 +597,7 @@ function KeyFormDialog({ open, existing, models, groups, onOpenChange, onSaved }
               <ModelPicker
                 value={splitList(form.models)}
                 options={models}
+                free={freeModels}
                 onChange={(next) => {
                   setForm((s) => ({ ...s, models: next.join("\n") }));
                   void checkModels(next);

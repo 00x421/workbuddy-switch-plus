@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Plus, RefreshCw } from "lucide-react";
+import { Plus, QrCode, RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -188,10 +188,12 @@ const TASK_KINDS = [
 ] as const;
 const TASK_KIND_LABELS: Record<string, string> = { checkin: "签到", travel: "派猫猫旅行", keepalive: "凭据保活", active: "活跃上报" };
 
-export function AccountsPanel({ overview, reload, onAddAccount }: {
+export function AccountsPanel({ overview, reload, onAddAccount, onBatchScan }: {
   overview: RpOverview;
   reload: () => Promise<void>;
   onAddAccount: () => void;
+  /** 批量扫码入口。做成回调而不是内置弹窗：这个面板要能被别处复用而不带上半屏逻辑。 */
+  onBatchScan: () => void;
 }) {
   const { accounts, pool } = overview;
   // 上游最近一次读取失败的说明（空 = 没问题）。它决定「冷却状态未知」那一条
@@ -383,6 +385,7 @@ export function AccountsPanel({ overview, reload, onAddAccount }: {
               批量活跃上报
             </Button>
             <Button size="sm" onClick={onAddAccount}><Plus className="size-3.5" />添加账号</Button>
+            <Button size="sm" variant="outline" onClick={onBatchScan}><QrCode className="size-3.5" />批量扫码</Button>
           </div>
         }
       />

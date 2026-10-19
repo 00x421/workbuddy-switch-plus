@@ -121,6 +121,28 @@ function extractDetail(data: unknown): string {
  */
 export type RpRealm = "cn" | "global";
 
+/**
+ * 批量扫码里的一格。
+ *
+ * 服务端返回的是 `{slot, status, ...flow}` 的展开形态 —— 成功时 flow 的
+ * `id/url/expires_at/interval/realm/region` 直接铺在同一层，所以这里的 `flow_id`
+ * 其实就是 flow 的 `id`。**失败格只有 `slot` 和 `error`**，没有任何 flow 字段。
+ *
+ * 三种状态刻意不合并：`ready` 是拿到链接、`failed` 是这次没拿到、
+ * `done` 是扫完了（由前端在轮询成功后自己标，服务端不知道用户扫没扫）。
+ */
+export type RpBatchScanItem = {
+  slot: string;
+  status: "ready" | "failed";
+  id?: string;
+  url?: string;
+  expires_at?: number;
+  interval?: number;
+  realm?: string;
+  region?: string;
+  error?: string;
+};
+
 /** 国际版可选地区（派发给服务端的 IOS2 短码，与服务端 REGION_CODES 一致）。 */
 export const RP_REGIONS: ReadonlyArray<{ code: string; label: string }> = [
   { code: "HK", label: "中国香港" },
@@ -336,6 +358,9 @@ export type RpRequestLog = {
   tokens: number;
   credit: number;
   duration_ms: number;
+  /** 首个非空响应分片到达的耗时。流式下约等于首字延迟，非流式为 0。
+   * `tok/s` 列的分母就是 `duration_ms - first_token_ms`（见 request-log-panel 的 logTps）。 */
+  first_token_ms?: number;
   outcome: "success" | "upstream_error" | "no_account" | "rejected" | string;
   source: "api" | "test" | string;
   /** 走的是哪把密钥（`RpKey.id`）。null / 空 = 这次调用没走密钥（直连 / 被拒请求）。
@@ -390,10 +415,9 @@ export type RpToken = {
 
 export type RpUser = { username: string; role: "admin" | "viewer" | string };
 
-export type RpSecurityConfig = { enabled: boolean; mode: "whitelist" | "blacklist" };
-export type RpIpRule = { id: string; kind: "allow" | "deny"; cidr: string; note: string; created_at: number };
+// 安全策略 / IP 规则 / 审计日志的类型定义统一放在文件下方（RpSecurityConfig 等），
+// 这里不再重复声明 —— 同名重复会让 tsc 报 Duplicate identifier。
 export type RpIpLog = { ts: number; ip: string; path: string; blocked: boolean; reason: string; ua: string };
-export type RpAuditLog = { time: number; actor: string; action: string; target: string; detail: string };
 
 export type RpKeyInput = {
   name: string; expires_at?: number | null; max_ips?: number; ip_allowlist?: string[];
@@ -505,6 +529,76 @@ export type RpModelAliases = {
   unknown_targets: string[];
 };
 
+// ── 模型目录（/admin/api/models）─────────────────────────────────────
+//
+// 与 `RpModelAliases` 是两个端点：那个只管"别名指向谁"，这个管"有哪些模型、
+// 各自什么脾气"。模型白名单选择器的「只看限时免费」靠这里的 `free`。
+
+export type RpCatalogModel = {
+  id: string;
+  name: string;
+  vendor: string;
+  description: string;
+  context_window: number | null;
+  context_window_options: number[];
+  max_input_tokens: number | null;
+  max_output_tokens: number | null;
+  max_allowed_size: number | null;
+  credits: string;
+  credit_rate: number | null;
+  supports_tool_call: boolean;
+  supports_images: boolean;
+  supports_reasoning: boolean;
+  only_reasoning: boolean;
+  reasoning_effort: string | null;
+  temperature: number | null;
+  /** 上游分类标记。**判「限时免费」只认它**，不能拿 credits 文案去猜。 */
+  tags: string[];
+  /**
+   * 是否限时免费，由后端算好。**没有 tags 就是 false**——
+   * 宁可漏判也不误判：把收费模型标成免费，用户会拿它跑大活，账单出来才发现。
+   */
+  free?: boolean;
+  /** 哪些别名指向它（一眼看出"gpt-4o 实跑 glm-5.2"）。 */
+  aliases?: string[];
+  /** 有多少枚密钥的白名单里含它——决定某个模型能不能安全停用。 */
+  key_count?: number;
+};
+
+export type RpModelCatalog = {
+  models: RpCatalogModel[];
+  total: number;
+  /** 限时免费的条数，后端算好；界面上的"只看免费（N）"直接用它。 */
+  free_count?: number;
+  default_model: string;
+  aliases: Record<string, string>;
+  /** 读的是哪一份产品配置（装机快照 / 运行时缓存），排查"看不到某模型"先看它。 */
+  source: string;
+};
+
+export type RpSecurityConfig = {
+  enabled: boolean;
+  /** blacklist = 只挡 deny 规则；whitelist = 只放行 allow 规则（其余全挡）。 */
+  mode: "whitelist" | "blacklist" | string;
+};
+
+export type RpIpRule = {
+  id: string;
+  kind: "allow" | "deny" | string;
+  cidr: string;
+  note: string;
+  created_at: number;
+};
+
+export type RpAuditLog = {
+  time: number;
+  actor: string;
+  action: string;
+  target: string;
+  detail: string;
+  ip?: string | null;
+};
+
 // ── 用量统计（/admin/api/usage/stats）──────────────────────────────────
 //
 // 与「请求日志」的分工：那边是最近若干条的**明细**，这边是长期**分桶计数**，
@@ -543,6 +637,12 @@ export type RpUsageTotals = {
   credit: number;
   tokens_avg: number;
   duration_ms_avg: number;
+  /**
+   * 首字延迟均值（毫秒）。分母是**成功的**请求数 —— 失败请求没有首字，
+   * 用总调用数当分母会把均值稀释成「看起来变快了」。
+   * 服务端在 0.1.3 补上这个字段；旧后端返回 undefined，界面按「—」处理。
+   */
+  first_token_ms_avg?: number;
 };
 
 export type RpUsageStats = {
@@ -550,8 +650,25 @@ export type RpUsageStats = {
   hourly: RpUsageBucket[];
   /** 按天 / 按小时各自的总量。 */
   totals: { daily: RpUsageTotals; hourly: RpUsageTotals };
+  /**
+   * 窗口内**按模型**的输出速率排行。分母只算真正在生成的那段时间
+   * （总耗时 − 首字耗时），失败与 0 token 的请求不进样本。
+   * `tokens_per_sec` 为 null = 样本不足，不能显示成 0（0 看起来像"很慢"）。
+   */
+  throughput?: RpUsageThroughputRow[];
   /** 实际生效的窗口，以及后端保留上限（可据此提示"只看得到最近 N 天"）。 */
   window: { days: number; hours: number; daily_keep: number; hourly_keep: number };
+};
+
+export type RpUsageThroughputRow = {
+  model: string;
+  calls: number;
+  failed: number;
+  success: number;
+  tokens: number;
+  tokens_per_sec: number | null;
+  /** 参与速率计算的样本数。必须与速率一起显示：2 次和 200 次的数字长得一样。 */
+  throughput_samples: number;
 };
 
 /**
@@ -672,6 +789,26 @@ export const rp = {
   oauthPoll: (id: string) => request<{ status: string; updated?: boolean; message?: string }>(`oauth/${id}/poll`, { method: "POST" }),
   oauthCancel: (id: string) => request<{ ok: boolean }>(`oauth/${id}`, { method: "DELETE" }),
 
+  /**
+   * 批量生成登录码。
+   *
+   * 一次最多 50 张：服务端 `BATCH_SCAN_MAX` 与 `browser_login.MAX_FLOWS`（60）之间留了
+   * 余量，留给单账号入口正在用的那一张。分批不给「自动继续」是故意的 —— 一次 50 张
+   * 已经超出正常人能扫完的量，再多只会是一堆过期链接。
+   *
+   * `items` 里每一格都可能单独失败（上游抖动、超过同 owner 上限），失败格带 `error`，
+   * 成功的照常可用。**不能因为第 40 张失败就把前 39 张作废** —— 用户可能已经扫了。
+   */
+  batchScan: (count: number, realm?: RpRealm, region?: string, prefix?: string) =>
+    request<{
+      items: RpBatchScanItem[];
+      ready: number;
+      count: number;
+      realm: string;
+      region?: string;
+      ttl: number;
+    }>("oauth/batch/start", { method: "POST", body: { count, realm, region, prefix } }),
+
   testModel: (model: string, prompt: string) =>
     request<{ ok: boolean; status?: number; answer?: string; error?: string; seconds: number; usage?: { total_tokens?: number } }>(
       "test", { method: "POST", body: { model, prompt } }),
@@ -733,9 +870,29 @@ export const rp = {
   saveModelAliases: (aliases: Record<string, string>) =>
     request<{ ok: boolean; aliases: Record<string, string> }>("model-aliases", { method: "POST", body: { aliases } }),
 
+  // ── 模型目录 ────────────────────────────────────────────────────────
+  /** 完整模型目录（含 tags / free）。模型白名单选择器的免费筛选靠它。 */
+  modelCatalog: () => request<RpModelCatalog>("models"),
+
   // ── 用量统计 ────────────────────────────────────────────────────────
   usageStats: (days = 30, hours = 24) =>
     request<RpUsageStats>(`usage/stats?days=${days}&hours=${hours}`),
+
+  // ── 任务流水 ────────────────────────────────────────────────────────
+  /** 按类别汇总（成功/失败/成功率/最近一次）。与明细接口口径不同，不能合并。 */
+  taskSummary: (hours = 24) =>
+    request<{ hours: number; kinds: RpTaskSummaryRow[] }>(`pool/checkin-logs/summary?hours=${hours}`),
+};
+
+export type RpTaskSummaryRow = {
+  kind: string;
+  total: number;
+  ok: number;
+  failed: number;
+  /** 最近一次的 unix 秒；这一类从没跑过就是 null。 */
+  last: number | null;
+  /** 成功数 / 总数。总数为 0 时是 0.0（不是 1.0 —— "没跑过"不等于"全成功"）。 */
+  success_rate: number;
 };
 
 /** 请求日志里 outcome 字段的中文与色调。 */

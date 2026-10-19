@@ -2,10 +2,12 @@
 import asyncio
 import ipaddress
 import json
+import math
 import os
 import secrets
 import sys
 import threading
+import hmac
 import time
 from collections import deque
 from pathlib import Path
@@ -24,6 +26,7 @@ from . import assets
 from . import egress
 from . import groups
 from . import keysvc
+from . import mirror
 from . import realm as realm_mod
 from . import settings_store
 from . import throttle
@@ -35,6 +38,7 @@ from . import browser_login as browser_login_mod
 from .pool import TASK_KINDS, AccountPool, PoolMiddleware, default_pool
 from .metrics import RequestMetrics, MetricsMiddleware
 from .security import COOKIE, Security, bearer_session, digest, scope_to_role
+from . import security as security_mod
 from .iputil import client_ip, client_ip_from_scope, evaluate, valid_cidr
 
 MAX_BODY = 1024 * 1024
@@ -305,10 +309,88 @@ class IPGuardMiddleware:
     """入站 IP 管控（全局白/黑名单）：启用时对 /v1 与 /admin 请求按规则放行/拦截。
 
     关闭时（默认）零开销直接穿透。规则命中与否写进 `ip_access_logs` 供安全页查看。
+
+    三条**永远放行**的通道，都是为了「别把自己锁在门外」：
+
+    · 本机回环地址（127.0.0.1 / ::1）。这一条是硬编码的，不是策略的一部分：
+      所有部署方式里，能在服务器本机敲命令的人本来就能直接改 state.json，
+      挡他没有任何安全收益，只会在用户存下一份写错的规则时把整个面板锁死。
+      真正防的是外部来源，那部分策略照常生效。
+
+    · 刚刚成功保存过安全策略的那个来源（`ip_last_allowed`）。保存成功这件事
+      本身就是「这个来源此刻确实还进得来」的证据；把它一起挡掉，用户会失去
+      唯一能修改规则的入口，只能去服务器上手工改 state.json。
+      这条**只对带本人会话的请求生效**：会话是按来源 IP 记账的，换个来源
+      拿着同一张票过来不算数，别人也伪造不了。匿名请求该挡就挡，否则
+      「墙挡没挡住」这件事就没法验了。
+
+    · 放行规则（allow）相关的三个端点。这条更实际：用户点「一键放行本机」
+      的前提是他已经点不到任何页面了，只能靠这条后路把规则加回来。
+      但**要求先给出一个有效身份**（管理令牌 / 管理密钥 / 本人会话）：只放
+      allow 规则、不放任何别的写操作，且不给匿名者 —— 否则任何被墙挡住的人
+      都能把自己加进白名单，「IP 管控」就只是一个摆设。
+      身份不过关时一律 401，比 403 更准确：他缺的是身份，不是权限。
     """
 
-    def __init__(self, app, store):
-        self.app, self.store = app, store
+    #: 被策略挡住时仍可访问的 admin 端点（方法, 路径片段）。
+    SELF_RESCUE = (
+        ("POST", "/admin/api/security/rules"),
+        ("GET", "/admin/api/security/rules"),
+        ("DELETE", "/admin/api/security/rules/"),
+    )
+
+    def __init__(self, app, store, sec=None):
+        """`sec` 是 `Security` 实例（管理密钥与 legacy 开关都在它身上）。
+
+        单独传进来而不是从 store 里翻：`Security` 是全局唯一的那一个，
+        中间件判断「这个 X-Admin-Token 算不算身份」必须和它同一份真相。
+        """
+        self.app, self.store, self.sec = app, store, sec
+
+    @staticmethod
+    def _loopback(ip: str) -> bool:
+        try:
+            addr = ipaddress.ip_address((ip or "").strip())
+        except ValueError:
+            return False
+        return addr.is_loopback
+
+    def _rescue(self, method: str, path: str) -> bool:
+        for verb, prefix in self.SELF_RESCUE:
+            if method == verb and path.startswith(prefix):
+                return True
+        return False
+
+    def _authorized(self, scope, ip: str) -> bool:
+        """这个请求有没有一个有效身份（会话 / 管理令牌 / 管理密钥）。
+
+        只看**来源是否对得上**：会话绑定签发时的来源 IP，换个地址拿同一张票
+        过来不算数。这条规则和 `SecurityManager` 里的绑定检查同口径。
+
+        拿到身份后**顺手把它挂到 `scope["state"]`**：中间件在这里已经解过一遍
+        cookie 与令牌，再让下游的安全层用一模一样的口径解第二遍，除了浪费一次
+        HMAC 与一次 PBKDF2，还会给「两套口径哪天改歪一个」留下缝隙。
+        """
+        headers = {k.decode().lower(): v.decode(errors="replace") for k, v in scope.get("headers", [])}
+        if not headers.get("authorization") and not headers.get("x-admin-token"):
+            return False
+        sid, _ = security_mod.bearer_session_from_headers(headers)
+        if sid:
+            with self.store.lock:
+                record = self.store.sessions.get(security_mod.digest(sid))
+            if record and record.get("expires", 0) > time.time():
+                bound = (record.get("ip") or "").strip()
+                if bound and bound != ip:
+                    return False
+                scope.setdefault("state", {})["session"] = record
+                return True
+        key = headers.get("x-admin-token", "").strip()
+        if key and self.sec is not None and self.sec.admin_key and hmac.compare_digest(key, self.sec.admin_key):
+            if not self.sec.legacy_key_configured:
+                return False
+            scope.setdefault("state", {})["admin_key_ok"] = True
+            return True
+        return False
 
     def _log(self, ip: str, path: str, blocked: bool, reason: str, ua: str) -> None:
         try:
@@ -331,14 +413,44 @@ class IPGuardMiddleware:
         if not cfg.get("enabled"):
             return await self.app(scope, receive, send)
         ip = client_ip_from_scope(scope)
+        # 本机直通，与身份无关：能在服务器上敲命令的人本来就能改 state.json。
+        if self._loopback(ip):
+            return await self.app(scope, receive, send)
         rules = self.store.data.get("ip_rules", [])
         allowed = evaluate(ip, rules, cfg.get("mode", "blacklist"))
-        headers = {k.decode().lower(): v.decode(errors="replace") for k, v in scope.get("headers", [])}
-        self._log(ip, path, not allowed, "" if allowed else "global", headers.get("user-agent", ""))
         if not allowed:
+            headers = {k.decode().lower(): v.decode(errors="replace") for k, v in scope.get("headers", [])}
+            self._log(ip, path, True, "global", headers.get("user-agent", ""))
+            # 两个例外，都是为了「别把自己锁在门外」，且都要求先给出有效身份：
+            #   · 刚保存过策略的来源（ip_last_allowed）—— 它此刻确实还进得来；
+            #   · 放行规则端点 —— 用户点「一键放行本机」的唯一后路。
+            # 匿名者一个都不给：否则任何人被挡住之后都能把自己加回白名单，
+            # 「IP 管控」就只是摆设。
+            if self._trusted_here(ip, scope):
+                return await self.app(scope, receive, send)
+            if self._rescue(scope.get("method", ""), path):
+                if self._authorized(scope, ip):
+                    return await self.app(scope, receive, send)
+                response = JSONResponse({"detail": "来源 IP 已被安全策略拒绝；"
+                                                   "自救入口需要先登录（管理密钥或管理令牌）"}, 401)
+                return await response(scope, receive, send)
             response = JSONResponse({"detail": "来源 IP 已被安全策略拒绝"}, 403)
             return await response(scope, receive, send)
         await self.app(scope, receive, send)
+
+    def _trusted_here(self, ip: str, scope=None) -> bool:
+        """这个来源是不是「刚刚成功保存过安全策略」的那一个。
+
+        只认命中，不做通配：记录的是单个地址，比较也按字符串相等。
+        **要求带本人会话或管理密钥**：换个来源拿同一张票过来不算数，
+        因为会话绑定签发时的来源 IP。
+        """
+        saved = ((self.store.data.get("ip_last_allowed") or {}).get("value") or "").strip()
+        if not saved or saved != (ip or "").strip():
+            return False
+        if scope is None:
+            return True
+        return self._authorized(scope, ip)
 
 
 def block_metadata_target(url: str) -> None:
@@ -477,7 +589,7 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
     app.add_middleware(AdminMiddleware)
     app.add_middleware(PoolMiddleware, pool=pool)
     app.add_middleware(MetricsMiddleware, metrics=metrics)
-    app.add_middleware(IPGuardMiddleware, store=store)
+    app.add_middleware(IPGuardMiddleware, store=store, sec=security)
     # SPA（workbuddy-switch 前端）跨源调用 /admin/api/*：走 X-Admin-Token 头鉴权、不使用 cookie，
     # 因此可放开 CORS。最后添加 → 处于最外层，在 AdminMiddleware 之前处理预检 OPTIONS。
     # 可用 WB_ADMIN_CORS_ORIGINS 收紧来源（逗号分隔），默认放开。
@@ -638,7 +750,7 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
             security.clear_fail(ip)
             actor = f"token:{row['name']}"
             sid, csrf = security.start_session(actor, scope_to_role(row["scope"]),
-                                               via="token", token_id=row["id"])
+                                               via="token", token_id=row["id"], ip=ip)
             security.audit({"username": actor}, "login", row["name"],
                            f"管理令牌登录；来源 {ip}")
             # 令牌换来的会话照常种 cookie：内置静态后台就是靠它维持登录态的
@@ -660,7 +772,7 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
                     store.attempts[ip] = failures + [now]
                     raise HTTPException(401, "管理密钥不正确")
                 store.attempts.pop(ip, None)
-            sid, csrf = security.start_session("admin", "admin", via="session")
+            sid, csrf = security.start_session("admin", "admin", via="session", ip=ip)
             security.audit({"username": "admin"}, "login", "admin", f"管理密钥登录；来源 {ip}")
             return _login_response(csrf, sid, req)
 
@@ -674,7 +786,7 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
             security.audit({"username": username or "(空)"}, "login_failed", username, f"来源 {ip}")
             raise HTTPException(401, "用户名或密码错误")
         security.clear_fail(ip, username)
-        sid, csrf = security.start_session(user["username"], user["role"], via="session")
+        sid, csrf = security.start_session(user["username"], user["role"], via="session", ip=ip)
         security.audit(user, "login", user["username"], f"来源 {ip}")
         return _login_response(csrf, sid, req)
 
@@ -817,7 +929,13 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
     async def security_config(req: Request):
         viewer(req)
         with store.lock:
-            return dict(store.data.get("security") or {"enabled": False, "mode": "blacklist"})
+            cfg = dict(store.data.get("security") or {"enabled": False, "mode": "blacklist"})
+            # `current_ip` / `last_allowed_ip` 只用于界面上的自救提示，不是策略的一部分。
+            # 白名单模式保存之后本机很可能就此失联，用户需要知道要放行哪个地址 ——
+            # 而这个地址只能由*现在*还连得上的这次请求告诉它。
+            cfg["current_ip"] = client_ip(req)
+            cfg["last_allowed_ip"] = (store.data.get("ip_last_allowed") or {}).get("value") or ""
+            return cfg
 
     @app.post("/admin/api/security/config")
     async def write_security_config(req: Request):
@@ -828,8 +946,34 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
             raise HTTPException(400, "模式无效")
         cfg = {"enabled": bool(body.get("enabled")), "mode": mode}
         with store.lock:
+            # 保存「上一次真的被放行过」的 IP。白名单模式一旦保存成功，本机如果
+            # 不在放行名单里，**下一次请求就是 403** —— 用户会立刻失去这个页面，
+            # 也就失去了把自己放回来的入口，只能去服务器上手工改 state.json。
+            # 记下来还不够（用户可能在别的机器上操作），所以 GET /security/config
+            # 会把它一并回传，由界面顶一条「继续会被挡」的红条。
+            previous = dict(store.data.get("security") or {})
             store.data["security"] = cfg
+            if cfg["enabled"] or previous.get("mode") != cfg["mode"]:
+                # 只在「策略可能变严」的两种情况下记：一是刚启用，二是刚切模式。
+                # 关掉开关或同一模式下点保存，没有失联风险，不必覆盖这份备份。
+                store.data.setdefault("ip_last_allowed", {})["value"] = client_ip(req)
             store.save()
+        if cfg["enabled"]:
+            # 中间件只认来源 IP，不认会话：一个刚被挡在门外的来源，手里若还留着
+            # 之前发出去的会话，每个请求都会 401 —— 而 401 会走 `record_fail()`，
+            # 连挂几次就把这个 IP 送进 10 分钟登录锁定，于是「刚把他挡住」变成
+            # 「他现在连正确口令都登不进来」。所以收紧策略的同时，把门外来源的
+            # 会话和失败计数一起清掉：挡就是挡干净，不留一条半开的缝。
+            #
+            # **但当前这次请求的来源绝不能踢**：保存策略的那一次本身就是
+            # 「这个来源还进得来」的证据。把它踢掉，操作者会在点下保存的瞬间
+            # 失去自己，而这时他已经点不到任何页面去救自己了。
+            here = client_ip(req)
+            rules = list(store.data.get("ip_rules", []))
+            mode = cfg["mode"]
+            for known in security.session_ips():
+                if known != here and not evaluate(known, rules, mode):
+                    security.revoke_sessions_from(known)
         security.audit(actor, "update_security", "",
                        f"enabled={cfg['enabled']} mode={cfg['mode']}；来源 {client_ip(req)}")
         return cfg
@@ -1219,6 +1363,36 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
                     raise HTTPException(
                         400, f"全池并发上限需在 0–{throttle.MAX_CONCURRENCY} 之间")
                 settings["max_total_concurrency"] = gate
+            # ── 镜像加速（重试 / 退避）──
+            # 三项一起用：enabled 是总开关，attempts 是**总尝试次数**（含第一次），
+            # backoff 是首次退避基数（指数增长 + 抖动，上限见 mirror 模块）。
+            # 关掉时把另外两项也清成默认值，避免界面上看起来"还开着"但实际不生效。
+            if "retry_enabled" in body:
+                enabled = bool(body["retry_enabled"])
+                settings["retry_enabled"] = enabled
+                if not enabled:
+                    settings["retry_attempts"] = 0
+                    settings["retry_backoff"] = 0.0
+            if "retry_attempts" in body:
+                try:
+                    attempts = int(body["retry_attempts"])
+                except (TypeError, ValueError):
+                    raise HTTPException(400, "重试次数需为整数")
+                if not 0 <= attempts <= mirror.MAX_ATTEMPTS_CAP:
+                    raise HTTPException(
+                        400, f"重试次数需在 0–{mirror.MAX_ATTEMPTS_CAP} 之间")
+                settings["retry_attempts"] = attempts
+            if "retry_backoff" in body:
+                try:
+                    backoff = float(body["retry_backoff"])
+                except (TypeError, ValueError):
+                    raise HTTPException(400, "退避基数需为数字")
+                if not math.isfinite(backoff) or backoff < 0:
+                    raise HTTPException(400, "退避基数需为有限的非负数")
+                if backoff > mirror.MAX_BACKOFF_CAP:
+                    raise HTTPException(
+                        400, f"退避基数最大 {mirror.MAX_BACKOFF_CAP:g} 秒")
+                settings["retry_backoff"] = round(backoff, 2)
             store.data["pool"] = settings
             store.save()
         # 改了地址/密钥必须立刻生效，不能还拿旧上游的缓存糊弄界面。
@@ -1228,7 +1402,8 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
                     'auto_active', 'active_time', 'active_reports',
                     'wb2api_base', 'wb2api_key',
                     'default_weight', 'default_max_concurrency', 'default_min_interval',
-                    'max_total_concurrency')
+                    'max_total_concurrency',
+                    'retry_enabled', 'retry_attempts', 'retry_backoff')
         security.audit(actor, "update_pool_settings", "",
                        f"字段={'、'.join(sorted(k for k in body if k in editable))}；来源 {client_ip(req)}")
         return {"ok": True, "pool": settings}
@@ -1258,6 +1433,9 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
 
         与 request-logs 的分工：那边是「最近 300 条的明细」，这边是「长期的分桶计数」，
         所以这一份会落进 state.json（由池的 tick 每分钟兜底刷盘），重启不丢。
+
+        返回里的 `throughput` 是按模型的输出速率排行，分母只算"真正在生成"的那段
+        时间（总耗时 − 首字耗时），失败与 0 token 的请求不进样本。
         """
         viewer(req)
         return usage.snapshot(store, days=days, hours=hours)
@@ -1389,7 +1567,8 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
           · `key_count`：有多少枚密钥的白名单里含它——决定某个模型能不能安全停用
         """
         viewer(req)
-        catalog = converter.get_model_catalog()
+        # 带 free 标注：模型选择器的「只看限时免费」全靠它，判据只有 tags。
+        catalog = converter.get_model_catalog_with_free()
         aliases = keysvc.model_aliases(store)
         reverse: dict[str, list[str]] = {}
         for alias, target in aliases.items():
@@ -1407,6 +1586,7 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
         return {
             "models": catalog,
             "total": len(catalog),
+            "free_count": sum(1 for entry in catalog if entry.get("free")),
             "default_model": converter.resolve_default_model(),
             "aliases": aliases,
             # 清单到底读的哪一份配置：产品配置有「装机快照」与「运行时缓存」两份，
@@ -1665,6 +1845,16 @@ def create_app(root=None, auth_dir=None, initial_key=None, admin_key=None, secur
         security.audit(actor, "assign_egress", aid,
                        f"线路={lid or '直连'}；来源 {client_ip(req)}")
         return {"ok": True, "lines": egress.list_lines(store)}
+
+    @app.get("/admin/api/pool/checkin-logs/summary")
+    async def checkin_log_summary(req: Request, hours: int = 24):
+        """任务流水的按类别汇总：每类成功/失败、最近一次时间、成功率。
+
+        与 `/checkin-logs` 的分工：那边是明细（最多 200 条），这边是"今天到底
+        签到成功几个号"这类一眼要能答的问题。
+        """
+        viewer(req)
+        return pool.task_summary(hours)
 
     @app.post("/admin/api/pool/checkin-logs/clear")
     async def clear_checkin_logs(req: Request, kind: str = ""):

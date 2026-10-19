@@ -36,6 +36,12 @@ struct Inner {
     child: Option<Child>,
     pid: Option<u32>,
     port: u16,
+    /// 当前这次启动用的监听地址（None = 没传 --host，走服务自己的默认值 127.0.0.1）。
+    ///
+    /// 这个字段存在只为了一件事：换端口重启时**沿用**原来的监听姿态。
+    /// 不记的话只能在 baseUrl 里猜，而 baseUrl 是按端口拼出来的，
+    /// `host` 这条信息在拼装时就已经丢了。
+    host: Option<String>,
     exe: Option<PathBuf>,
     /// 与读取线程共享：读线程不该再去抢 `inner` 的锁（调用方可能正持锁）。
     log: Arc<Mutex<Vec<String>>>,
@@ -52,6 +58,7 @@ impl Default for Inner {
             child: None,
             pid: None,
             port: DEFAULT_PORT,
+            host: None,
             exe: None,
             log: Arc::new(Mutex::new(Vec::new())),
             password: Arc::new(Mutex::new(None)),
@@ -425,6 +432,8 @@ fn start_service(
     if let Some(host) = &host {
         command.arg("--host").arg(host);
     }
+    // 记下这次用的监听地址：换端口重启时要沿用它，见 Inner::host 的注释。
+    inner.host = host.clone();
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -507,6 +516,43 @@ pub fn reverse_proxy_restart_with_host(
     };
     stop_service(&state)?;
     start_service(&state, Some(port), Some(host))
+}
+
+/// 换端口重启。
+///
+/// 端口同样是 uvicorn 的启动参数，改不了只能重启，所以走的也是「先停后启」。
+/// 与「换监听地址」的区别：**新端口要先确认没被占**。被占时若先停再启，
+/// 结果是旧服务已经没了、新服务又起不来 —— 用户从「能用」掉到「完全不能用」，
+/// 而这本来是一次可以拒绝的请求。
+///
+/// 监听地址**必须沿用当前姿态**：只在 127.0.0.1 上换端口，不该顺手把服务
+/// 暴露到局域网。判断依据是状态里的 baseUrl 是否已经绑了 0.0.0.0。
+#[tauri::command]
+pub fn reverse_proxy_restart_with_port(
+    state: tauri::State<'_, ReverseProxy>,
+    port: u16,
+) -> Result<Status, String> {
+    if port < 1 {
+        return Err("端口必须大于 0".to_string());
+    }
+    let (current, exposed) = {
+        let inner = state.lock();
+        let current = if inner.port == 0 { DEFAULT_PORT } else { inner.port };
+        (current, inner.host.as_deref() == Some("0.0.0.0"))
+    };
+    if port == current {
+        // 没变就什么都不做。这里**故意不重启**：用户手滑点两下不该让服务抖两次，
+        // 正在转发的请求也不该因为这个失败。
+        let mut inner = state.lock();
+        return Ok(status_of(&mut inner));
+    }
+    if port_open(port) {
+        return Err(format!(
+            "端口 {port} 已被占用，换端口前请先释放它（当前服务仍运行在 {current} 上，未受影响）"
+        ));
+    }
+    stop_service(&state)?;
+    start_service(&state, Some(port), exposed.then(|| "0.0.0.0".to_string()))
 }
 
 /// 服务数据目录：密钥、管理令牌、state.json 都在这里。

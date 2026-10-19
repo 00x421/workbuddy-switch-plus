@@ -21,6 +21,7 @@ from . import alerts
 from . import egress
 from . import groups
 from . import keysvc
+from . import mirror
 from . import report
 from . import throttle
 from . import travel
@@ -209,6 +210,16 @@ DEFAULT_POOL = {
     #
     # 默认 0 = 不限制，与改造前完全一致。它让请求**排队**，不让它们失败。
     "max_total_concurrency": 0,
+    # ── 镜像加速（重试 / 退避）──
+    #
+    # 上游偶发 5xx 和连接重置，在池里表现为「这个账号挂了」→ 冷却 → 换号 → 告警，
+    # 实际多数是几百毫秒内的瞬时故障。打开这一项后，这类失败会先重试再判死。
+    #
+    # **默认关闭**：重试会放大上游压力，配置项存在不等于应该打开。
+    # `retry_attempts` 是**总尝试次数**（含第一次），0 与「关闭」等价。
+    "retry_enabled": False,
+    "retry_attempts": 0,
+    "retry_backoff": 0.0,
 }
 
 
@@ -436,6 +447,47 @@ class AccountPool:
 
     def checkin_logs(self, limit=200):
         return self.task_logs(limit)
+
+    def task_summary(self, hours=24):
+        """按类别汇总任务流水：每类成功/失败多少、最近一次是什么时候。
+
+        为什么需要它：`task_logs()` 只给"最近 200 条明细"，翻起来很不直观——
+        「签到今天到底签了几个号成功几个」得自己数。这里直接给答案。
+
+        窗口按**自然时间**切（`hours` 小时前到现在），不是"最近 N 条"：
+        后者在任务跑得少的时候会把昨天的事也算进"今天"。
+        """
+        with self.store.lock:
+            logs = list(self.store.data.get("checkin_logs", []))
+        # 注意 `or` 会把显式的 0 吃掉回落到 24：这里的语义是"窗口至少 1 小时"，
+        # 传 0 应当被夹到 1，而不是悄悄变成一整天。
+        try:
+            window = int(hours)
+        except (TypeError, ValueError):
+            window = 24
+        window = max(1, window)
+        since = int(self.clock()) - window * 3600
+        rows = {}
+        for kind in TASK_KINDS:
+            rows[kind] = {"kind": kind, "total": 0, "ok": 0, "failed": 0, "last": None}
+        for row in logs:
+            if int(row.get("time") or 0) < since:
+                continue
+            kind = row.get("kind") or "checkin"
+            slot = rows.get(kind)
+            if slot is None:      # 未来新增的类别也不会被吞掉
+                slot = rows[kind] = {"kind": kind, "total": 0, "ok": 0,
+                                     "failed": 0, "last": None}
+            slot["total"] += 1
+            if row.get("ok"):
+                slot["ok"] += 1
+            else:
+                slot["failed"] += 1
+            slot["last"] = max(slot["last"] or 0, int(row.get("time") or 0))
+        out = list(rows.values())
+        for slot in out:
+            slot["success_rate"] = round(slot["ok"] / slot["total"], 4) if slot["total"] else 0.0
+        return {"hours": window, "kinds": out}
 
     def clear_task_logs(self, kind=None):
         """清空任务流水；给了 kind 只清那一类。返回清掉的条数。"""
@@ -795,7 +847,12 @@ class AccountPool:
         # 落盘一份，重启后还能看到（见 _load_request_log）。
         self._append_request_log(entry)
         with self.store.lock:
-            usage.record(self.store, now=now, status=status, tokens=tokens, credit=credit,
+            # 吞吐统计只关心**模型自己出了多少字、花了多久吐**。
+            # 失败请求的上游 body 常常带着半个 chunk 的 usage，把它当成 token 记进去，
+            # 分母（gen_ms）却按"只算成功"处理，算出来的速率会被凭空抬高。
+            # 聚合层的 tokens 记 0，请求日志里的原值照留 —— 那一份是用来对账的。
+            usage.record(self.store, now=now, status=status,
+                         tokens=tokens if ok else 0, credit=credit,
                          duration_ms=duration_ms, first_token_ms=first_token_ms,
                          model=upstream_model or model, key_id=key_id)
             self.usage_dirty = True
@@ -1920,6 +1977,12 @@ class PoolMiddleware:
         tokens_used = 0
         credit_used = 0.0
         cached_used = 0
+        # 已向下游发过多少字节。这是「还能不能重试」的唯一判据。
+        sent_bytes = 0
+        with self.pool.store.lock:
+            mirror_cfg = dict(self.pool.store.data.get("pool") or {})
+        attempt = 0
+        mirror_used = 0
         # 首个非空响应分片到达的耗时（毫秒）。流式下就是"首字延迟"的近似值：
         # 上游要先建连、鉴权、跑完 prefill 才会吐出第一个 chunk，慢在这一段最容易被误判成"卡住"。
         first_token_ms = 0
@@ -1970,9 +2033,52 @@ class PoolMiddleware:
                             pass
                 if len(buffer) > 65536:
                     buffer = b""
+            if message["type"] == "http.response.body":
+                nonlocal sent_bytes
+                sent_bytes += len(message.get("body", b"") or b"")
             await send(message)
+        while True:
+            # 镜像加速：上游 5xx 或连接层失败时，先重试再判死。
+            # 默认关闭（pool.retry_enabled 为 False），所以这一段对存量部署是空转。
+            try:
+                await self.app(scope, receive, observe)
+            except Exception:
+                # 连接层失败（超时 / 重置 / DNS）。上游什么都没答，但 status 还停在
+                # 200，必须显式改掉，否则下面会把它当成成功。
+                status = 599
+            if 200 <= status < 300:
+                break
+            # 已经向下游吐过字节就不能重试：会在流中间插进另一份完整的回答。
+            if sent_bytes:
+                break
+            # 连接层失败的 status 传 None，让 should_retry 认成"值得重试"。
+            signal = None if status == 599 else status
+            if not mirror.should_retry(signal, attempt, mirror_cfg):
+                break
+            await asyncio.sleep(mirror.delay_ms(attempt, mirror_cfg) / 1000.0)
+            attempt += 1
+            mirror_used = attempt
+            # 换一个号再试：同一个号刚 5xx 过一次，立刻原样重放大概率还是 5xx。
+            # 名额要还回去再占新的，否则那个号的在途计数永远少减一次。
+            try:
+                if granted is not None:
+                    self.pool.release(granted)
+                    granted = None
+                aid, manager = self.pool.select(affinity_key, key=key)
+                self.pool.acquire(aid)
+                granted = aid
+                REQUEST_CREDENTIAL.set(manager)
+            except HTTPException:
+                granted = None
+                break
+            status = 200
+            buffer = b""
+            tokens_used = 0
+            credit_used = 0.0
+            cached_used = 0
+            first_token_ms = 0
         try:
-            await self.app(scope, receive, observe)
+            pass  # 主体已在 while 循环里调完；这里只为让 finally 的归属保持直白
         finally:
             REQUEST_CREDENTIAL.reset(token)
             egress.REQUEST_EGRESS.reset(egress_token)

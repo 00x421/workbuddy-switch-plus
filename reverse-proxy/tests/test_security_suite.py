@@ -1,5 +1,7 @@
 """多密钥分发 / IP·模型白名单 / 额度 / 多用户鉴权（PBKDF2·防爆破·只读令牌）的验证。"""
+import contextlib
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -12,6 +14,33 @@ from admin import keysvc
 
 ADMIN_KEY = "admin-test-credential-long-enough"
 API = "client-existing-key"
+
+
+@contextlib.contextmanager
+def trust_proxy(on=True):
+    """临时打开/关闭「采信转发头」（`admin/iputil.py:17 trust_proxy()`）。
+
+    为什么必须有它：默认 `WB_TRUST_PROXY != "1"` 时 `client_ip*` 一律返回 TCP
+    对端的真实 IP，测试里的 `X-Forwarded-For` **完全不生效**。想验「外部来源
+    被挡住」就只能先把采信打开，否则塞进去的头被静默忽略，用例永远看到
+    127.0.0.1 —— 绿得没有任何意义。
+
+    用完必须还原成原值，不能 `pop` 了事：别的用例（或外部环境）可能本来就
+    设了这个变量，一把删掉会把它们的语义改掉。
+    """
+    key = "WB_TRUST_PROXY"
+    saved = os.environ.get(key)
+    if on:
+        os.environ[key] = "1"
+    else:
+        os.environ.pop(key, None)
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = saved
 
 
 def credential(uid="one", name="测试账号"):
@@ -196,17 +225,53 @@ class SecuritySuite(unittest.IsolatedAsyncioTestCase):
 
     # ── 入站 IP 管控 ─────────────────────────────────────────────
     async def test_ip_guard_blacklist(self):
-        await self.login_key()
-        self.assertEqual((await self.client.post("/admin/api/security/config", json={"enabled": False, "mode": "blacklist"})).status_code, 200)
-        r = await self.client.post("/admin/api/security/rules", json={"kind": "deny", "cidr": "127.0.0.0/8"})
-        self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual((await self.client.post("/admin/api/security/rules", json={"kind": "deny", "cidr": "bogus"})).status_code, 400)
-        self.assertEqual((await self.client.post("/admin/api/security/config", json={"enabled": True, "mode": "blacklist"})).status_code, 200)
-        # 现在本机被 deny → 403
-        self.assertEqual((await self.client.get("/admin/api/overview")).status_code, 403)
-        logs = self.app.state.store.data.get("ip_access_logs", [])
-        self.assertTrue(any(l["blocked"] for l in logs))
+        """黑名单命中一个**外部**来源时确实挡住。
+
+        这里刻意不拿 127.0.0.1 当靶子：回环地址在中间件里是硬编码直通的
+        （部署在本机的人本来就能改 state.json，挡他只会把面板锁死），
+        用本机试会永远拿到 200，测出来的是「豁免生效」而不是「策略生效」。
+
+        而且**必须先把 WB_TRUST_PROXY 打开**（`admin/iputil.py:17`）：默认不采信
+        转发头，peer 永远是 127.0.0.1，塞 `X-Forwarded-For` 根本不起作用 ——
+        不打开的话这两条用例验的是空气，绿得毫无意义。
+        """
+        with trust_proxy():
+            await self.login_key()
+            self.assertEqual((await self.client.post("/admin/api/security/config", json={"enabled": False, "mode": "blacklist"})).status_code, 200)
+            r = await self.client.post("/admin/api/security/rules", json={"kind": "deny", "cidr": "203.0.113.0/24"})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual((await self.client.post("/admin/api/security/rules", json={"kind": "deny", "cidr": "bogus"})).status_code, 400)
+            self.assertEqual((await self.client.post("/admin/api/security/config", json={"enabled": True, "mode": "blacklist"})).status_code, 200)
+            # 外部来源命中 deny → 403（匿名也挡：身份不清不等于可以放行）
+            outside = {"X-Forwarded-For": "203.0.113.7"}
+            self.assertEqual((await self.client.get("/admin/api/overview", headers=outside)).status_code, 403)
+            # 本机依旧直通，不受这条规则影响
+            self.assertEqual((await self.client.get("/admin/api/overview")).status_code, 200)
+            logs = self.app.state.store.data.get("ip_access_logs", [])
+            self.assertTrue(any(l["blocked"] for l in logs))
         # 直接关掉开关以便后续用例不受影响
+        with self.app.state.store.lock:
+            self.app.state.store.data["security"]["enabled"] = False
+
+    async def test_ip_guard_rescue_needs_identity(self):
+        """被挡住时，「加放行规则」这条自救后路必须凭身份才给。
+
+        否则任何人被墙挡住之后都能把自己写回白名单，IP 管控就只是摆设。
+        身份不对时返 401 而不是 403 —— 他缺的是身份，不是权限。
+        """
+        with trust_proxy():
+            await self.login_key()
+            await self.client.post("/admin/api/security/config", json={"enabled": False, "mode": "blacklist"})
+            await self.client.post("/admin/api/security/rules", json={"kind": "deny", "cidr": "203.0.113.0/24"})
+            await self.client.post("/admin/api/security/config", json={"enabled": True, "mode": "blacklist"})
+            outside = {"X-Forwarded-For": "203.0.113.7"}
+            body = {"kind": "allow", "cidr": "203.0.113.7"}
+            self.assertEqual((await self.client.post("/admin/api/security/rules", json=body, headers=outside)).status_code, 401)
+            self.assertEqual(
+                (await self.client.post("/admin/api/security/rules", json=body,
+                                        headers={**outside, "X-Admin-Token": "not-a-real-key"})).status_code,
+                401,
+            )
         with self.app.state.store.lock:
             self.app.state.store.data["security"]["enabled"] = False
 

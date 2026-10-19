@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Banner, Empty, PanelHeader, StatCard, ToneBadge, fmtNum } from "@/components/reverse-proxy/rp-shared";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { rp, type RpModelAliases, type RpUsageStats } from "@/lib/reverse-proxy";
+import { rp, type RpModelAliases, type RpModelCatalog, type RpUsageStats } from "@/lib/reverse-proxy";
 
 /**
  * 模型与用量。
@@ -53,6 +53,48 @@ export function ModelsUsagePanel() {
   useEffect(() => { void load(); }, [load]);
 
   const known = useMemo(() => new Set(aliases?.known_models ?? []), [aliases]);
+
+  /** 模型目录。和用量/别名分开存：它挂了不该让那两块白屏，反之亦然。 */
+  const [catalog, setCatalog] = useState<RpModelCatalog | null>(null);
+  const [catalogError, setCatalogError] = useState("");
+  const [catalogQuery, setCatalogQuery] = useState("");
+  const [freeOnly, setFreeOnly] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    // 单独拉、单独失败：目录挂了不该让别名表和用量统计一起白屏。
+    rp.modelCatalog()
+      .then((data) => {
+        if (!alive) return;
+        setCatalog(data);
+      })
+      .catch((cause) => {
+        if (!alive) return;
+        setCatalogError(cause instanceof Error ? cause.message : String(cause));
+      });
+    return () => { alive = false; };
+  }, []);
+
+  /** 限时免费的模型清单。目录拉不到就是空集 —— 不标色，绝不瞎标。 */
+  const freeModels = useMemo(
+    () => new Set((catalog?.models ?? []).filter((m) => m.free).map((m) => m.id)),
+    [catalog],
+  );
+
+  /** 目录页的筛选。先按免费筛再按关键字筛，顺序不影响结果，但都作用在原始清单上。 */
+  const shownModels = useMemo(() => {
+    const needle = catalogQuery.trim().toLowerCase();
+    return (catalog?.models ?? []).filter((m) => {
+      if (freeOnly && !m.free) return false;
+      if (!needle) return true;
+      return (
+        m.id.toLowerCase().includes(needle) ||
+        (m.name ?? "").toLowerCase().includes(needle) ||
+        (m.vendor ?? "").toLowerCase().includes(needle) ||
+        (m.aliases ?? []).some((a) => a.toLowerCase().includes(needle))
+      );
+    });
+  }, [catalog, catalogQuery, freeOnly]);
 
   /** 本地校验：哪些行的目标模型不在已知清单里（多半是拼错）。 */
   const unknownTargets = useMemo(() => {
@@ -112,6 +154,125 @@ export function ModelsUsagePanel() {
 
       {error ? <Banner tone="bad">{error}</Banner> : null}
 
+      {/* ── 模型目录 ──
+          放在用量之前：进这一页的人第一个问题是「有哪些模型、各能装多少」，
+          第二个才是「跑得多快」。 */}
+      <section className="rounded-xl border border-border/70 bg-card">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 px-4 py-2.5">
+          <div className="flex items-baseline gap-2">
+            <span className="text-xs font-medium">模型目录</span>
+            <span className="text-[11px] text-muted-foreground">
+              {catalog ? `共 ${catalog.total} 个${catalog.free_count ? `，限时免费 ${catalog.free_count} 个` : ""}` : "读取中…"}
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <input
+                type="checkbox"
+                className="size-3.5 accent-primary"
+                checked={freeOnly}
+                onChange={(e) => setFreeOnly(e.target.checked)}
+              />
+              只看限时免费{catalog?.free_count ? `（${catalog.free_count}）` : ""}
+            </label>
+            <Input
+              className="h-7 w-52 text-xs"
+              value={catalogQuery}
+              placeholder="搜模型 / 厂商 / 别名"
+              onChange={(e) => setCatalogQuery(e.target.value)}
+            />
+          </div>
+        </div>
+
+        {catalogError ? (
+          <div className="px-4 py-6 text-center text-xs text-muted-foreground">
+            模型目录读取失败：{catalogError}
+          </div>
+        ) : !catalog ? (
+          <div className="px-4 py-6 text-center text-xs text-muted-foreground">
+            正在读取…
+          </div>
+        ) : shownModels.length === 0 ? (
+          <div className="px-4 py-6 text-center text-xs text-muted-foreground">
+            {/* 「筛出来是空的」和「一个模型都没有」是两件事，文案必须分开，
+                否则用户会以为上游配置挂了。 */}
+            {catalog.models.length === 0
+              ? "上游没有提供任何模型配置。先看账号池里有没有可用账号。"
+              : `当前筛选条件下没有匹配的模型（全量 ${catalog.models.length} 个）。`}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[880px] text-xs">
+              <thead>
+                <tr className="text-left text-muted-foreground">
+                  <th className="px-4 py-2 font-medium">模型</th>
+                  <th className="px-4 py-2 font-medium">厂商</th>
+                  <th className="px-4 py-2 text-right font-medium">上下文</th>
+                  <th className="px-4 py-2 text-right font-medium">最大输出</th>
+                  <th className="px-4 py-2 font-medium">能力</th>
+                  <th className="px-4 py-2 text-right font-medium">积分</th>
+                  <th className="px-4 py-2 font-medium">别名</th>
+                  <th className="px-4 py-2 text-right font-medium">密钥数</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shownModels.map((m) => (
+                  <tr key={m.id} className="border-t border-border/50">
+                    <td className="px-4 py-2">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-medium">{m.name || m.id}</span>
+                        {m.free ? <ToneBadge tone="ok">限时免费</ToneBadge> : null}
+                      </div>
+                      <div className="font-mono text-[10px] text-muted-foreground">{m.id}</div>
+                    </td>
+                    <td className="px-4 py-2 text-muted-foreground">{m.vendor || "—"}</td>
+                    <td className="px-4 py-2 text-right tabular-nums">
+                      {m.context_window ? fmtTokens(m.context_window) : "—"}
+                    </td>
+                    <td className="px-4 py-2 text-right tabular-nums">
+                      {m.max_output_tokens ? fmtTokens(m.max_output_tokens) : "—"}
+                    </td>
+                    <td className="px-4 py-2">
+                      <div className="flex flex-wrap gap-1">
+                        {m.supports_tool_call ? <ToneBadge tone="muted">工具</ToneBadge> : null}
+                        {m.supports_images ? <ToneBadge tone="muted">图片</ToneBadge> : null}
+                        {m.supports_reasoning ? <ToneBadge tone="muted">思考</ToneBadge> : null}
+                        {!m.supports_tool_call && !m.supports_images && !m.supports_reasoning ? (
+                          <span className="text-[11px] text-muted-foreground">—</span>
+                        ) : null}
+                      </div>
+                    </td>
+                    <td className="px-4 py-2 text-right text-[11px] text-muted-foreground">
+                      {m.credits || "—"}
+                    </td>
+                    <td className="px-4 py-2 font-mono text-[11px]">
+                      {(m.aliases ?? []).length ? (m.aliases ?? []).join("、") : "—"}
+                    </td>
+                    <td className="px-4 py-2 text-right tabular-nums">
+                      {m.key_count ?? 0}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="space-y-1 border-t border-border/60 px-4 py-2.5 text-[11px] leading-4 text-muted-foreground">
+          <p>
+            「限时免费」只认上游的 tags 字段，标签缺失一律当收费 ——
+            宁可漏判也不误判：把收费模型标成免费，用户会拿它跑大活，账单出来才发现。
+          </p>
+          {catalog?.source ? (
+            <p>
+              这份目录读自 <code className="font-mono">{catalog.source}</code>
+              {/* 排查「看不到某个模型」时第一个要问的就是这一条：
+                  读的是装机快照还是运行时缓存，直接决定了该去刷新哪一边。 */}
+            </p>
+          ) : null}
+        </div>
+      </section>
+
       {/* ── 用量 ── */}
       {totals ? (
         <>
@@ -124,7 +285,57 @@ export function ModelsUsagePanel() {
             />
             <StatCard label="Token 总量" value={fmtNum(totals.tokens, 0)} hint={`均 ${fmtNum(totals.tokens_avg, 1)} / 次`} />
             <StatCard label="积分消耗" value={fmtNum(totals.credit, 2)} />
+            {/* 首字延迟放这里而不是只放按天表：换模型时第一个被问的就是它。
+                没有样本时显示「—」而不是「0 ms」——后者看着像瞬间出字。 */}
+            <StatCard
+              label="首字延迟（均）"
+              value={totals.first_token_ms_avg ? `${fmtNum(totals.first_token_ms_avg, 0)} ms` : "—"}
+              hint={`均 ${fmtNum(totals.duration_ms_avg, 0)} ms / 次`}
+            />
           </div>
+
+          {/* 按模型输出速率。放在按天明细之前：调模型「快不快」比「哪天用了多少」
+              更常被问，而这张表只有几行。 */}
+          {(stats?.throughput ?? []).length > 0 ? (
+            <section className="rounded-xl border border-border/70 bg-card">
+              <div className="border-b border-border/60 px-4 py-2.5">
+                <span className="text-xs font-medium">输出速率（tok/s，按模型）</span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[560px] text-xs">
+                  <thead>
+                    <tr className="text-left text-muted-foreground">
+                      <th className="px-4 py-2 font-medium">模型</th>
+                      <th className="px-4 py-2 text-right font-medium">tok/s</th>
+                      <th className="px-4 py-2 text-right font-medium">样本</th>
+                      <th className="px-4 py-2 text-right font-medium">调用</th>
+                      <th className="px-4 py-2 text-right font-medium">Token</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(stats?.throughput ?? []).map((row) => (
+                      <tr key={row.model} className="border-t border-border/50">
+                        <td className="px-4 py-2 font-mono">{row.model}</td>
+                        <td className="px-4 py-2 text-right tabular-nums">
+                          {/* null 显示成「—」而不是 0：0 看起来像「这个模型慢得不能用了」，
+                              实际含义是「还没有能算的样本」。两者处理方式完全不同。 */}
+                          {row.tokens_per_sec === null ? "—" : row.tokens_per_sec.toFixed(1)}
+                        </td>
+                        <td className="px-4 py-2 text-right tabular-nums text-muted-foreground">{fmtNum(row.throughput_samples, 0)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums">{fmtNum(row.calls, 0)}</td>
+                        <td className="px-4 py-2 text-right tabular-nums">{fmtNum(row.tokens, 0)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="border-t border-border/60 px-4 py-2 text-[11px] leading-4 text-muted-foreground">
+                分母只算<strong className="font-medium">真正在生成</strong>的那段（总耗时 − 首字耗时）。
+                失败请求与 0 token 的请求不进样本 —— 重试会把排队时间摊进耗时，混进去速率会被压成噪声。
+                「样本」列必须和速率一起看：2 次和 200 次跑出来的数字长得一样。
+              </p>
+            </section>
+          ) : null}
 
           {/* 按天明细。取最近 14 天，再多屏幕放不下、也没人逐行看。 */}
           {(stats?.daily ?? []).length > 0 ? (
@@ -245,11 +456,22 @@ export function ModelsUsagePanel() {
                 已知模型（{aliases.known_models.length} 个，点开对照）
               </summary>
               <div className="mt-2 flex flex-wrap gap-1.5">
-                {aliases.known_models.map((model) => (
-                  <code key={model} className="rounded border border-border/70 px-1.5 py-0.5 font-mono">
-                    {model}
-                  </code>
-                ))}
+                {aliases.known_models.map((model) => {
+                  // 限时免费的模型在这里标出来：别名表最常被写的就是"把新模型挂到
+                  // 惯用名上"，而新模型往往正是限时免费的那几个。
+                  const isFree = freeModels.has(model);
+                  return (
+                    <code
+                      key={model}
+                      className={isFree
+                        ? "rounded border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 font-mono text-emerald-600 dark:text-emerald-400"
+                        : "rounded border border-border/70 px-1.5 py-0.5 font-mono"}
+                      title={isFree ? "限时免费" : undefined}
+                    >
+                      {model}
+                    </code>
+                  );
+                })}
               </div>
             </details>
           ) : (
@@ -269,4 +491,16 @@ export function ModelsUsagePanel() {
       </div>
     </div>
   );
+}
+
+/** 上下文 / 输出上限用「≤1M」「≤200K」这种量级。
+ *
+ *  精确数字随上游改版浮动，而用户真正关心的是「装不装得下一整份代码」。
+ *  写成 1,000,000 反而要自己去数零。
+ */
+function fmtTokens(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  if (n >= 1_000_000) return `≤${Math.round(n / 100_000) / 10}M`;
+  if (n >= 1000) return `≤${Math.round(n / 1000)}K`;
+  return `≤${n}`;
 }
